@@ -75,37 +75,34 @@ type Change struct {
 
 // Apply commits distinct records atomically. Revision zero expects a missing item.
 func (s *Store) Apply(ctx context.Context, token string, changes ...Change) error {
-	if len(changes) == 0 || len(changes) > 100 {
-		return errors.New("lifecycle transaction requires 1 to 100 changes")
+	return s.apply(ctx, token, nil, changes)
+}
+
+func (s *Store) apply(ctx context.Context, token string, fence *types.ConditionCheck, changes []Change) error {
+	preconditions := 0
+	if fence != nil {
+		preconditions = 1
+	}
+	if len(changes) == 0 || len(changes)+preconditions > 100 {
+		return errors.New("lifecycle transaction requires 1 to 100 operations")
 	}
 	if len(token) > 36 {
 		return errors.New("lifecycle transaction token exceeds 36 characters")
 	}
-	items := make([]types.TransactWriteItem, 0, len(changes))
+	items := make([]types.TransactWriteItem, 0, len(changes)+preconditions)
 	seen := make(map[Key]bool, len(changes))
+	if fence != nil {
+		items = append(items, types.TransactWriteItem{ConditionCheck: fence})
+		seen[readKey(fence.Key)] = true
+	}
 	for _, change := range changes {
-		record := change.Record
-		if seen[record.Key] {
+		if seen[change.Record.Key] {
 			return errors.New("lifecycle transaction repeats a record key")
 		}
-		seen[record.Key] = true
-		if change.ExpectedRevision < 0 || change.ExpectedRevision == 1<<63-1 {
-			return errors.New("invalid expected lifecycle revision")
-		}
-		record.Revision = change.ExpectedRevision + 1
-		item, err := record.item()
+		seen[change.Record.Key] = true
+		put, err := change.put(s.table)
 		if err != nil {
 			return err
-		}
-		put := &types.Put{TableName: aws.String(s.table), Item: item}
-		if change.ExpectedRevision == 0 {
-			put.ConditionExpression = aws.String("attribute_not_exists(PK)")
-		} else {
-			put.ConditionExpression = aws.String("#rev = :rev AND #deployment = :deployment")
-			put.ExpressionAttributeNames = map[string]string{"#rev": "revision", "#deployment": "deployment"}
-			put.ExpressionAttributeValues = map[string]types.AttributeValue{
-				":rev": number(change.ExpectedRevision), ":deployment": text(record.Deployment),
-			}
 		}
 		items = append(items, types.TransactWriteItem{Put: put})
 	}
@@ -115,16 +112,48 @@ func (s *Store) Apply(ctx context.Context, token string, changes ...Change) erro
 		input.ClientRequestToken = aws.String(token)
 	}
 	if _, err := s.db.TransactWriteItems(ctx, input); err != nil {
-		if cancellation, ok := errors.AsType[*types.TransactionCanceledException](err); ok {
-			for _, reason := range cancellation.CancellationReasons {
-				if aws.ToString(reason.Code) == "ConditionalCheckFailed" {
-					return fmt.Errorf("%w: %w", ErrConflict, err)
-				}
-			}
-		}
-		return fmt.Errorf("commit lifecycle records: %w", err)
+		return transactionError(err, fence != nil)
 	}
 	return nil
+}
+
+func (c Change) put(table string) (*types.Put, error) {
+	if c.ExpectedRevision < 0 || c.ExpectedRevision == 1<<63-1 {
+		return nil, errors.New("invalid expected lifecycle revision")
+	}
+	c.Record.Revision = c.ExpectedRevision + 1
+	item, err := c.Record.item()
+	if err != nil {
+		return nil, err
+	}
+	put := &types.Put{TableName: aws.String(table), Item: item}
+	if c.ExpectedRevision == 0 {
+		put.ConditionExpression = aws.String("attribute_not_exists(PK)")
+		return put, nil
+	}
+	put.ConditionExpression = aws.String("#rev = :rev AND #deployment = :deployment")
+	put.ExpressionAttributeNames = map[string]string{"#rev": "revision", "#deployment": "deployment"}
+	put.ExpressionAttributeValues = map[string]types.AttributeValue{
+		":rev": number(c.ExpectedRevision), ":deployment": text(c.Record.Deployment),
+	}
+	return put, nil
+}
+
+func transactionError(err error, fenced bool) error {
+	cancellation, ok := errors.AsType[*types.TransactionCanceledException](err)
+	if !ok {
+		return fmt.Errorf("commit lifecycle records: %w", err)
+	}
+	for i, reason := range cancellation.CancellationReasons {
+		if aws.ToString(reason.Code) != "ConditionalCheckFailed" {
+			continue
+		}
+		if fenced && i == 0 {
+			return fmt.Errorf("%w: %w", ErrLeaseLost, err)
+		}
+		return fmt.Errorf("%w: %w", ErrConflict, err)
+	}
+	return fmt.Errorf("commit lifecycle records: %w", err)
 }
 
 // Get reads the base table consistently. A missing record returns nil.
@@ -201,6 +230,16 @@ func (r Record) item() (map[string]types.AttributeValue, error) {
 	item["deployment"] = text(r.Deployment)
 	item["revision"] = number(r.Revision)
 	item["payload"] = text(string(r.Payload))
+	if r.Key == leaseKey(r.Deployment) {
+		lease, err := decodeLease(r)
+		if err != nil {
+			return nil, err
+		}
+		item["leaseOwner"] = text(lease.Owner)
+		item["leaseEpoch"] = number(lease.Epoch)
+		item["leasePhase"] = text(lease.Phase)
+		item["leaseUntilMillis"] = number(lease.ValidUntil.UnixMilli())
+	}
 	if !r.DueAt.IsZero() {
 		digest := sha256.Sum256([]byte(r.Key.PK + "\x00" + r.Key.SK))
 		item[DuePartition] = text(duePartitionKey(r.Deployment, int(digest[0])%dueShards))
