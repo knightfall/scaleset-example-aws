@@ -36,7 +36,7 @@
 
 ## Clarity and Simplicity
 
-- Optimise for comprehension, not line count. Be concise when intent and failure paths remain obvious; avoid syntactic cleverness.
+- Do not optimise for syntactic cleverness. Prefer familiar, easily reviewable constructs when two implementations are otherwise equivalent. Replace readable code with shorter alternatives only when they materially improve clarity.
 - Use modern, idiomatic Go when it improves clarity, not merely because a construct is shorter or newer.
 - Prefer values by default. Use pointers intentionally for optionality, mutation, identity, or SDK contracts; preserve zero versus absent versus unknown.
 - Prefer straightforward loops and early returns. Split dense conditions when they express distinct invariants or need actionable errors.
