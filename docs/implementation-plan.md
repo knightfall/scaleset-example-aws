@@ -317,6 +317,8 @@ The delivery processor writes a sanitized receipt and monotonic job observations
 
 The `SESSION` record journals an open or close before the SDK sends it. Opening claims the canonical scope and scale-set identity, and its receipt becomes durable in the same transaction as the new cursor and initial demand. Closing confirms the exact remote session, clears its demand, and retains the cursor and admission reservations for recovery. Credential handover checks the candidate's target before closing the old session. An ambiguous mutation blocks replacement after the request deadline and requires evidence scoped to the prior owner and session. Provider contracts for lost responses and remote absence remain sandbox checks.
 
+The supervisor runs one serialized lane for each enabled profile and renews the active deployment lease. Profiles referencing the same secret ARN share GitHub rate-limit cooldowns. Candidate validation is shared by the profiles using the same connection. Missing backend evidence keeps admission closed. Shutdown cancels polls, joins the lanes, confirms closure, and checks the base table for unfinished effects before releasing the lease. The root controller will supply verified backend capacity and invoke the supervisor when active runtime wiring is ready.
+
 Recover across AWS/GitHub/DynamoDB boundaries as follows.
 
 | Failure or ambiguity | Recovery |

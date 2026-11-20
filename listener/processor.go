@@ -30,6 +30,10 @@ type Processor struct {
 // Step handles at most one delivery on the profile's serialized effect lane.
 // A nil capacity denotes unknown headroom. A zero maximum closes admission.
 func (p Processor) Step(ctx context.Context, lease lifecycle.Lease, profile string, capacity *Capacity) error {
+	return p.step(ctx, lease, profile, capacity, nil)
+}
+
+func (p Processor) step(ctx context.Context, lease lifecycle.Lease, profile string, capacity *Capacity, refresh func(context.Context) *Capacity) error {
 	if p.Store == nil || p.Session == nil || p.MaxDemandAge <= 0 || profile == "" {
 		return errors.New("delivery processor requires a store, session, profile and demand freshness limit")
 	}
@@ -92,6 +96,10 @@ func (p Processor) Step(ctx context.Context, lease lifecycle.Lease, profile stri
 	}
 	if progress.PendingMessageID == 0 {
 		return nil
+	}
+	if refresh != nil {
+		// Backend occupancy can change during the GitHub long poll.
+		capacity = refresh(ctx)
 	}
 	return p.finish(ctx, lease, profile, progress, capacity)
 }
