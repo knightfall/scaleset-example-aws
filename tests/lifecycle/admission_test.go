@@ -18,7 +18,7 @@ import (
 
 var admissionTime = time.Date(2026, 11, 21, 1, 0, 0, 0, time.UTC)
 
-func admissionStore(t *testing.T) (*lifecycle.Store, *database, lifecycle.Lease) {
+func admissionStore(t *testing.T, now time.Time) (*lifecycle.Store, *database, lifecycle.Lease) {
 	t.Helper()
 	ledger, db := store(t)
 	db.query = func(input *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
@@ -38,7 +38,7 @@ func admissionStore(t *testing.T) (*lifecycle.Store, *database, lifecycle.Lease)
 		}
 		return &dynamodb.QueryOutput{}, nil
 	}
-	lease, err := ledger.AcquireLease(t.Context(), "dev", "controller", admissionTime, time.Minute)
+	lease, err := ledger.AcquireLease(t.Context(), "dev", "controller", now, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func acquisitionState(t *testing.T, ledger *lifecycle.Store, id int64) string {
 }
 
 func TestAdmissionPreservesAcceptedAndUncertainCapacityAcrossReplayAndRestart(t *testing.T) {
-	ledger, db, lease := admissionStore(t)
+	ledger, db, lease := admissionStore(t, admissionTime)
 	first := offer("session-1", 1, 10, 10, 11)
 	recorded, err := ledger.RecordInbox(t.Context(), "dev", "build", first.Message)
 	if err != nil || !recorded {
@@ -121,7 +121,7 @@ func TestAdmissionPreservesAcceptedAndUncertainCapacityAcrossReplayAndRestart(t 
 }
 
 func TestUncertainAdmissionIsNeverSentAgainAndCanBeRecordedForAcknowledgement(t *testing.T) {
-	ledger, db, lease := admissionStore(t)
+	ledger, db, lease := admissionStore(t, admissionTime)
 	first := offer("session-1", 1, 10)
 	first.EffectiveMax = 3
 	expectDecision(t, ledger, lease, first, true, false, 10)
@@ -148,7 +148,7 @@ func TestUncertainAdmissionIsNeverSentAgainAndCanBeRecordedForAcknowledgement(t 
 }
 
 func TestAdmissionSerializesCompetingDeliveriesAndFencesFormerOwner(t *testing.T) {
-	ledger, _, lease := admissionStore(t)
+	ledger, _, lease := admissionStore(t, admissionTime)
 	expectDecision(t, ledger, lease, offer("session-1", 1), false, true)
 	now := admissionTime.Add(time.Second)
 	ctx := t.Context()
@@ -197,7 +197,7 @@ func TestAdmissionSerializesCompetingDeliveriesAndFencesFormerOwner(t *testing.T
 
 func TestAdmissionFitsTransactionLimitAndRejectsPreexistingUncountedRows(t *testing.T) {
 	t.Run("transaction limit", func(t *testing.T) {
-		ledger, db, lease := admissionStore(t)
+		ledger, db, lease := admissionStore(t, admissionTime)
 		ids := make([]int64, 110)
 		for i := range ids {
 			ids[i] = int64(i + 1)
@@ -210,7 +210,7 @@ func TestAdmissionFitsTransactionLimitAndRejectsPreexistingUncountedRows(t *test
 		}
 	})
 	t.Run("previous uncounted acquisition", func(t *testing.T) {
-		ledger, _, lease := admissionStore(t)
+		ledger, _, lease := admissionStore(t, admissionTime)
 		record, err := lifecycle.AcquisitionChange("dev", "build", lifecycle.Acquisition{RequestID: 10, State: "pending"}, 0)
 		if err != nil {
 			t.Fatal(err)
