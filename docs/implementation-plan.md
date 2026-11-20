@@ -16,6 +16,19 @@ The application worktree starts at `e751880` with only `.gitignore` tracked. The
 | Amazon ECS | SDK v2 `RunTask` with a revision-qualified task definition, explicit cluster, `FARGATE`, `awsvpc` configuration and a durable `clientToken`. Read `tasks` and `failures` even after HTTP success. Use `ListTasks`, `DescribeTasks` and `StopTask` with eventual-consistency handling. `startedBy` can correlate an ambiguous launch. Token validity is finite. [RunTask](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_RunTask.html) · [ECS idempotency](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ECS_Idempotency.html) |
 | Shared state and infrastructure | SDK v2 DynamoDB conditional and transactional APIs support atomic state changes and coordination within one Region. ECS and ASG APIs are outside those transactions. CDK v2 can reference existing infrastructure, including `Cluster.fromClusterAttributes` with the imported VPC for controller hosting. ECS clusters are regional and placement in the supplied VPC comes from task/service networking. [DynamoDB transactions](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html) · [CDK Cluster API](https://docs.aws.amazon.com/cdk/api/v2/docs/aws-cdk-lib.aws_ecs.Cluster.html) |
 
+### Offline SDK contract tests
+
+The fixtures in `internal/sdkcontract` drive the pinned SDK clients through scripted HTTP exchanges. All endpoints, credentials and responses are test data. Unexpected requests fail the test, so the fixtures can check wire counts after an ambiguous response.
+
+| SDK surface | Offline evidence |
+| --- | --- |
+| GitHub authentication and routing | Enterprise PAT registration-token paths on GitHub.com, GHE.com and GHES, GitHub App installation-token exchange, runner-group resolution, scale-set name lookup, and outbound labels and runner settings during creation. Check the portable selector grammar and label readback on the target GitHub host. |
+| GitHub session and recovery | Initial statistics, cursor and capacity headers, token refresh, job acquisition results, ack and session close. Verify a one-attempt JIT request and deterministic-name lookup after a lost response. Header transmission does not establish the service's zero-capacity behavior or assignment ordering. |
+| AWS execution | ASG inventory, weighted capacity and protection fields, single-attempt desired-capacity writes and targeted termination. ECS cluster and task revision preflight, count-one launch, identical explicit-token replay, task lookup and stop. Fixtures cover the wire format and response parsing. Live tests cover scale-in behavior, idempotency expiry and eventually consistent recovery. |
+| AWS supporting services | EC2 instance and launch-template reads, DynamoDB transaction and conditional one-time handoff, Secrets Manager version selection, IAM role IDs, STS caller IDs, versioned S3 reads, and SQS receipt handling. IAM and per-executor identity isolation still require the live checks in section 11. |
+
+Run the suite with `go test -race ./internal/sdkcontract` using the pinned Go toolchain. Re-run it when upgrading either SDK. Section 11 lists the service behaviors that require a sandbox canary.
+
 ## 2. Architecture and ownership
 
 One Dockerised Go controller runs independent concurrent listener and reconciliation workers. Each profile owns one homogeneous GitHub scale set and one execution backend. The shared table holds lifecycle and ownership, while GitHub supplies job demand. AWS inventory and lifecycle events supply resource observations. Use one AWS account and Region per controller deployment initially. Deploy separate controller environments for other accounts or Regions.
@@ -432,7 +445,7 @@ The following commands also show the individual checks and the planned Docker bu
 
 ```sh
 go mod verify
-test -z "$(gofmt -l .)"
+make check-go
 go test -race ./...
 go vet ./...
 golangci-lint run
