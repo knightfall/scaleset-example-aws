@@ -13,7 +13,7 @@
     "config:emit": "node bin/emit-runtime.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "format:check": "prettier --check . ../testdata/config",
+    "format:check": "prettier --check . ../testdata",
     "test": "node --test 'test/**/*.test.ts'"
   },
   "dependencies": {
