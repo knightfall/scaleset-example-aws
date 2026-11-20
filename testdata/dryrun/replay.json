@@ -1,0 +1,32 @@
+{
+  "apiVersion": "runners.example/v1alpha1",
+  "kind": "RunnerDemandReplay",
+  "environment": "engineering-dev",
+  "records": [
+    {
+      "profileId": "linux-docker",
+      "scopeURL": "https://github.com/example-engineering",
+      "runnerGroup": "Linux-Docker",
+      "scaleSet": "linux-docker",
+      "observedAt": "2026-11-21T00:02:00Z",
+      "demand": { "assignedJobs": 3, "runningJobs": 1 },
+      "inventory": {
+        "complete": true,
+        "backendLimit": 6,
+        "executors": [
+          { "id": "fixture-busy", "state": "busy", "owned": true },
+          { "id": "fixture-idle", "state": "idle", "owned": true },
+          { "id": "fixture-unmapped", "state": "unknown", "owned": false }
+        ]
+      }
+    },
+    {
+      "profileId": "linux-docker",
+      "scopeURL": "https://github.com/example-engineering",
+      "runnerGroup": "Linux-Docker",
+      "scaleSet": "linux-docker",
+      "observedAt": "2026-11-21T00:00:00Z",
+      "demand": { "assignedJobs": 1, "runningJobs": 0 }
+    }
+  ]
+}
