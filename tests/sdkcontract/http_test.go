@@ -16,6 +16,7 @@ type exchange struct {
 	status   int
 	response string
 	check    func(*http.Request)
+	headers  http.Header
 	err      error
 }
 
@@ -64,7 +65,7 @@ func (s *scriptedHTTP) Do(req *http.Request) (*http.Response, error) {
 	return &http.Response{
 		StatusCode: step.status,
 		Status:     fmt.Sprintf("%d %s", step.status, http.StatusText(step.status)),
-		Header:     make(http.Header),
+		Header:     step.headers.Clone(),
 		Body:       io.NopCloser(strings.NewReader(step.response)),
 		Request:    req,
 	}, nil

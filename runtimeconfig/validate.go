@@ -53,7 +53,7 @@ func (a Artifact) validate() error {
 func checkGitHubProfiles(spec Spec) (map[string]string, error) {
 	scopes := make(map[string]string, len(spec.GitHub))
 	for name, connection := range spec.GitHub {
-		scope, err := connection.scope()
+		scope, err := connection.CanonicalScope()
 		if err != nil {
 			return nil, fmt.Errorf("GitHub connection %s: %w", name, err)
 		}
@@ -316,7 +316,8 @@ func (b *deploymentBindings) useCluster(name, field string) error {
 
 var scopePath = regexp.MustCompile(`^/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?/?$`)
 
-func (c GitHubConnection) scope() (string, error) {
+// CanonicalScope validates the GitHub URL and normalizes its routing identity.
+func (c GitHubConnection) CanonicalScope() (string, error) {
 	u, err := url.Parse(c.ScopeURL)
 	if err != nil || !strings.EqualFold(u.Scheme, "https") || u.Hostname() == "" ||
 		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
