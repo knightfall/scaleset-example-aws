@@ -34,6 +34,17 @@
 - Write meaningful tests for changed behaviour.
 - Pin tool versions and use the same checks in CI.
 
+## Clarity and Simplicity
+
+- Optimise for comprehension, not line count. Be concise when intent and failure paths remain obvious; avoid syntactic cleverness.
+- Use modern, idiomatic Go when it improves clarity, not merely because a construct is shorter or newer.
+- Prefer values by default. Use pointers intentionally for optionality, mutation, identity, or SDK contracts; preserve zero versus absent versus unknown.
+- Prefer straightforward loops and early returns. Split dense conditions when they express distinct invariants or need actionable errors.
+- Extract functions for clearer responsibilities, not arbitrary line limits. Add interfaces, helpers, and types only for a concrete need.
+- Keep lifecycle transitions, ownership, concurrency, retries, and recovery explicit and auditable.
+- Explain non-obvious constraints, not what the code already says. Avoid cosmetic refactors and unnecessary code churn.
+- Before finishing, check whether another engineer can follow both the normal path and failure cases without reconstructing hidden control flow.
+
 ## Delivery
 
 - Make the smallest complete, testable change.
