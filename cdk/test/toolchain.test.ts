@@ -18,7 +18,7 @@ test("the pinned CDK CLI synthesizes a TypeScript stack offline", (t) => {
       "synth",
       "Toolchain",
       "--app",
-      "node fixtures/toolchain-stack.ts",
+      "node test/fixtures/toolchain-stack.ts",
       "--strict",
       "--no-lookups",
       "--notices=false",

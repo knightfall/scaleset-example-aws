@@ -88,13 +88,13 @@ Require one active/draining profile per GitHub host/scope/group/scale set identi
 
 CDK creates a deterministic, normalized runtime JSON artifact from the validated YAML. Resolve created resources with stable physical names and the deployment account/Region. Use canonical names or ARNs for imports, and add deployment dependencies explicitly. Publish the runtime artifact by content digest as a nonsecret, versioned S3 asset with restricted access. Pin the digest in the managed host launch settings. External hosts can mount the exact artifact read-only or fetch the same digest using AWS IAM. The Go process verifies the digest and validates before opening clients, then reports mode and configuration version. No secret values enter YAML, synthesized templates, assets, Docker layers or logs.
 
-The configuration compiler and both JSON schemas are under `cdk/config/`. From the repository root, compile a YAML file to a new local JSON file and print the SHA-256 of its exact bytes:
+The CDK entry points live in `cdk/bin/`, the configuration compiler in `cdk/lib/config/`, and the environment YAML and versioned schemas in `cdk/config/`. TypeScript tests live in `cdk/test/`. From the repository root, compile a YAML file to a new local JSON file and print the SHA-256 of its exact bytes:
 
 ```sh
-npm --prefix cdk run config:emit -- config/fixtures/asg-only-external.yaml /tmp/runner-runtime.json
+npm --prefix cdk run config:emit -- ../testdata/config/asg-only-external.yaml /tmp/runner-runtime.json
 ```
 
-The runtime envelope contains the normalized `config`, the resolved tracking table name, and the ARNs of selected ECS clusters. Its bytes are independent of YAML comments and mapping key order. Sample inputs and matching runtime fixtures cover ASG-only, Fargate-only, and mixed environments. For a custom GHES host, `spec.github.<connection>.caBundlePath` identifies the trusted CA file supplied by the controller host.
+The runtime envelope contains the normalized `config`, the resolved tracking table name, and the ARNs of selected ECS clusters. Its bytes are independent of YAML comments and mapping key order. The shared YAML and runtime fixtures in `testdata/config/` cover ASG-only, Fargate-only, and mixed environments. For a custom GHES host, `spec.github.<connection>.caBundlePath` identifies the trusted CA file supplied by the controller host.
 
 ### EC2-only example on an existing external Docker host
 
@@ -468,9 +468,9 @@ docker build --tag scaleset-controller:local .
 From `cdk/`, use the pinned CLI and committed environment fixtures.
 
 ```sh
-npx --no-install cdk synth --strict -c config=config/fixtures/asg-only-external.yaml
-npx --no-install cdk synth --strict -c config=config/fixtures/fargate-only-import.yaml
-npx --no-install cdk synth --strict -c config=config/fixtures/mixed-ecs-host.yaml
+npx --no-install cdk synth --strict -c config=../testdata/config/asg-only-external.yaml
+npx --no-install cdk synth --strict -c config=../testdata/config/fargate-only-import.yaml
+npx --no-install cdk synth --strict -c config=../testdata/config/mixed-ecs-host.yaml
 npm run test:synth-matrix
 npx --no-install cdk diff --method=template -c config=config/sandbox.yaml
 ```

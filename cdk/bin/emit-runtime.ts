@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 import process from "node:process";
-import { loadEnvironmentConfig } from "./config.ts";
+import { loadEnvironmentConfig } from "../lib/config/config.ts";
 
 const [source, output, ...extra] = process.argv.slice(2);
 if (!source || !output || extra.length > 0) {

@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { isScalar, parseAllDocuments, visit } from "yaml";
-import configSchema from "./schema/controller-config-v1alpha1.json" with { type: "json" };
-import runtimeSchema from "./schema/controller-runtime-v1alpha1.json" with { type: "json" };
+import configSchema from "../../config/schema/controller-config-v1alpha1.json" with { type: "json" };
+import runtimeSchema from "../../config/schema/controller-runtime-v1alpha1.json" with { type: "json" };
 import type {
   EnvironmentConfig,
   GitHubConnection,

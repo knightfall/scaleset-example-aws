@@ -10,9 +10,11 @@ import { stringify } from "yaml";
 import {
   compileEnvironmentConfig,
   loadEnvironmentConfig,
-} from "../config/config.ts";
+} from "../lib/config/config.ts";
 
-const fixtures = fileURLToPath(new URL("../config/fixtures/", import.meta.url));
+const fixtures = fileURLToPath(
+  new URL("../../testdata/config/", import.meta.url),
+);
 const asg = join(fixtures, "asg-only-external.yaml");
 const fargate = join(fixtures, "fargate-only-import.yaml");
 const mixed = join(fixtures, "mixed-ecs-host.yaml");
@@ -306,9 +308,7 @@ test("CLI emits the validated JSON and prints its digest", (t) => {
   const directory = mkdtempSync(join(tmpdir(), "scaleset-config-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const artifact = join(directory, "runtime.json");
-  const cli = fileURLToPath(
-    new URL("../config/emit-runtime.ts", import.meta.url),
-  );
+  const cli = fileURLToPath(new URL("../bin/emit-runtime.ts", import.meta.url));
   const args = [cli, asg, artifact];
   const output = execFileSync(process.execPath, args, { encoding: "utf8" });
   const { json, sha256 } = loadEnvironmentConfig(asg);
