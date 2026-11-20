@@ -79,7 +79,7 @@ Keep canonical authored YAML under `cdk/config/*.yaml`. Publish a versioned JSON
 | `spec.mode`, `spec.dryRun` | `mode` defaults to `dry-run`. `active` requires an explicit deployment setting and an active IAM policy. `dryRun.demand` defaults to `none`, or selects a local snapshot/replay path or a read-only S3 object with an expected digest. `dryRun.inspectAws` defaults to false. Dry-run has no configured GitHub demand credential flow. |
 | `spec.controller` | Require `image` pinned to a registry digest and `hosting` union. `external` has an `identity` union (existing EC2 principal with scoped role attachment or explicit role assumption, or an existing Roles Anywhere trust/profile). `ec2` requires a network ref, AMI ID and instance type. `ecs-fargate` requires a network ref, cluster ref, architecture, and valid CPU/memory combination. |
 | `spec.tracking.table` | `create` derives a stable physical name from the environment, or `import` requires a table name and ownership/schema preflight. Retention/PITR and encryption requirements apply to both. |
-| `spec.ecsClusters` | Optional named catalog, needed only for ECS consumers. `import` takes a cluster ARN. `create` explicitly declares a name. A host and runner may share a compatible cluster or select separate clusters. A created catalog entry needs a selected consumer and a network placement defined by that consumer. |
+| `spec.ecsClusters` | Optional named catalog, needed only for ECS consumers. `import` takes a cluster ARN. `create` explicitly declares a name. A host and runner may share a compatible cluster or select separate clusters. A create entry resolves only when selected by a consumer with a defined network placement. |
 | `spec.github` | Named connections with `scopeURL` and a required `auth` union. `github-app` takes a Secrets Manager `secretArn` and requires an organisation or repository URL. `enterprise-pat` takes a Secrets Manager `secretArn` and requires an enterprise URL of the form `https://<host>/enterprises/<slug>`. Reject mismatched scopes and credential values in configuration. Require an approved HTTPS host and a trusted GHES CA where applicable. Profile GitHub mapping has a connection ref, existing group name, scale set name, optional pinned numeric scale set ID, and exact label list. `registration` defaults to `existing`. `create-if-missing` creates only in active mode after an exact group/name lookup. Treat changed group, ID or labels as an explicit migration. |
 | `spec.profiles[]` | At least one profile, with at least one `active` or `draining`. Require immutable ID, state (`active\|draining\|disabled`), purpose, supported OS/architecture, routing, and capacity. Require `0 <= idleReserve <= maxRunners` and `maxRunners > 0`. Validate startup timeout and per-profile limits. The effective advertised max is also bounded by verified backend limits. |
 | `profiles[].provisioner` | `asg` requires a group ARN, capacity units mode (`instances` or `fixed-weight` with a positive integer weight), bootstrap role ARN and protocol version. `fargate` requires cluster and network refs, a full task definition ARN with revision, runner container name, bootstrap task role ARN, execution role ARN, and protocol version. Reject keys from the other variant. `disabled` profiles do not activate or retain backend resources after verified drain. |
@@ -87,6 +87,14 @@ Keep canonical authored YAML under `cdk/config/*.yaml`. Publish a versioned JSON
 Require one active/draining profile per GitHub host/scope/group/scale set identity and one owner per imported ASG. Resolve and recheck by canonical ARNs, GitHub group and set IDs, and case-insensitive names. Require an unambiguous workflow selector per profile. For v1, keep labels disjoint across managed profiles within a GitHub scope and require each selector list to include its scale set name. Preflight overlapping legacy selectors and group access. Validate subnet/VPC/security-group associations and the controller/runner network boundary, Fargate architecture and pinned definition role matches, ASG homogeneity, and actual ASG limits. Allow task definition reuse only for the same trust boundary and compatible purpose, OS and architecture. Track each profile independently using intent IDs and ownership tags.
 
 CDK creates a deterministic, normalized runtime JSON artifact from the validated YAML. Resolve created resources with stable physical names and the deployment account/Region. Use canonical names or ARNs for imports, and add deployment dependencies explicitly. Publish the runtime artifact by content digest as a nonsecret, versioned S3 asset with restricted access. Pin the digest in the managed host launch settings. External hosts can mount the exact artifact read-only or fetch the same digest using AWS IAM. The Go process verifies the digest and validates before opening clients, then reports mode and configuration version. No secret values enter YAML, synthesized templates, assets, Docker layers or logs.
+
+The CDK entry points live in `cdk/bin/`, the configuration compiler in `cdk/lib/config/`, and the environment YAML and versioned schemas in `cdk/config/`. TypeScript tests live in `cdk/test/`. From the repository root, compile a YAML file to a new local JSON file and print the SHA-256 of its exact bytes:
+
+```sh
+npm --prefix cdk run config:emit -- ../testdata/config/asg-only-external.yaml /tmp/runner-runtime.json
+```
+
+The runtime envelope contains the normalized `config`, the resolved tracking table name, and the ARNs of selected ECS clusters. Its bytes are independent of YAML comments and mapping key order. The shared YAML and runtime fixtures in `testdata/config/` cover ASG-only, Fargate-only, and mixed environments. For a custom GHES host, `spec.github.<connection>.caBundlePath` identifies the trusted CA file supplied by the controller host.
 
 ### EC2-only example on an existing external Docker host
 
@@ -460,9 +468,9 @@ docker build --tag scaleset-controller:local .
 From `cdk/`, use the pinned CLI and committed environment fixtures.
 
 ```sh
-npx --no-install cdk synth --strict -c config=config/fixtures/asg-only-external.yaml
-npx --no-install cdk synth --strict -c config=config/fixtures/fargate-only-import.yaml
-npx --no-install cdk synth --strict -c config=config/fixtures/mixed-ecs-host.yaml
+npx --no-install cdk synth --strict -c config=../testdata/config/asg-only-external.yaml
+npx --no-install cdk synth --strict -c config=../testdata/config/fargate-only-import.yaml
+npx --no-install cdk synth --strict -c config=../testdata/config/mixed-ecs-host.yaml
 npm run test:synth-matrix
 npx --no-install cdk diff --method=template -c config=config/sandbox.yaml
 ```

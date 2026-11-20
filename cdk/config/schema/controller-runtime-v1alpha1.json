@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://runners.example/schemas/controller-runtime-v1alpha1.json",
+  "title": "RunnerController runtime artifact",
+  "type": "object",
+  "properties": {
+    "apiVersion": {
+      "const": "runners.example/v1alpha1"
+    },
+    "kind": {
+      "const": "RunnerControllerRuntime"
+    },
+    "config": {
+      "$ref": "https://runners.example/schemas/controller-config-v1alpha1.json"
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "trackingTableName": {
+          "$ref": "https://runners.example/schemas/controller-config-v1alpha1.json#/$defs/tableName"
+        },
+        "ecsClusterArns": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "https://runners.example/schemas/controller-config-v1alpha1.json#/$defs/id"
+          },
+          "additionalProperties": {
+            "$ref": "https://runners.example/schemas/controller-config-v1alpha1.json#/$defs/clusterArn"
+          }
+        }
+      },
+      "required": ["trackingTableName", "ecsClusterArns"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["apiVersion", "kind", "config", "resources"],
+  "additionalProperties": false
+}

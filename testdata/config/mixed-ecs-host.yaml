@@ -1,0 +1,109 @@
+---
+apiVersion: runners.example/v1alpha1
+kind: RunnerController
+metadata:
+  name: engineering-dev
+spec:
+  aws:
+    account: "111122223333"
+    region: ap-southeast-2
+  controller:
+    hosting:
+      type: ecs-fargate
+      network: controller-private
+      cluster: engineering
+      cpuArchitecture: x64
+      cpu: 512
+      memoryMiB: 1024
+    image: 111122223333.dkr.ecr.ap-southeast-2.amazonaws.com/controller@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  tracking:
+    table:
+      type: import
+      name: existing-runner-lifecycle
+  github:
+    corporate:
+      scopeURL: https://github.com/enterprises/example-corporate
+      auth:
+        type: enterprise-pat
+        secretArn: arn:aws:secretsmanager:ap-southeast-2:111122223333:secret:github-enterprise-pat-a1b2c3
+    engineering:
+      scopeURL: https://github.com/example-engineering
+      auth:
+        type: github-app
+        secretArn: arn:aws:secretsmanager:ap-southeast-2:111122223333:secret:github-app-engineering-a1b2c3
+  profiles:
+    - id: linux-docker
+      state: active
+      purpose: docker
+      platform:
+        os: linux
+        arch: x64
+      capacity:
+        idleReserve: 0
+        maxRunners: 12
+        startupTimeoutSeconds: 600
+      github:
+        connection: engineering
+        runnerGroup: Linux-Docker
+        scaleSet: linux-docker
+        labels:
+          - linux-docker
+      provisioner:
+        type: asg
+        groupArn: arn:aws:autoscaling:ap-southeast-2:111122223333:autoScalingGroup:12345678-1234-1234-1234-123456789012:autoScalingGroupName/engineering-linux-docker
+        capacityUnits:
+          type: instances
+        bootstrapRoleArn: arn:aws:iam::111122223333:role/runner-linux-bootstrap
+        bootstrapProtocol: v1
+    - id: linux-shell
+      state: active
+      purpose: fargate-compatible
+      platform:
+        os: linux
+        arch: arm64
+      capacity:
+        idleReserve: 0
+        maxRunners: 24
+        startupTimeoutSeconds: 600
+      github:
+        connection: corporate
+        runnerGroup: No-Docker
+        scaleSet: linux-shell
+        labels:
+          - linux-shell
+        registration: create-if-missing
+      provisioner:
+        type: fargate
+        cluster: runner-new
+        network: runner-private
+        taskDefinitionArn: arn:aws:ecs:ap-southeast-2:111122223333:task-definition/linux-shell-runner:7
+        runnerContainer: runner
+        bootstrapRoleArn: arn:aws:iam::111122223333:role/fargate-runner-bootstrap
+        executionRoleArn: arn:aws:iam::111122223333:role/fargate-runner-execution
+        bootstrapProtocol: v1
+  networks:
+    controller-private:
+      vpcId: vpc-0123456789abcdef0
+      subnets:
+        - id: subnet-0123456789abcdef0
+          az: ap-southeast-2a
+        - id: subnet-0123456789abcdef1
+          az: ap-southeast-2b
+      securityGroupIds:
+        - sg-0123456789abcdef0
+    runner-private:
+      vpcId: vpc-0123456789abcdef0
+      subnets:
+        - id: subnet-0123456789abcdef2
+          az: ap-southeast-2a
+        - id: subnet-0123456789abcdef3
+          az: ap-southeast-2b
+      securityGroupIds:
+        - sg-0123456789abcdef1
+  ecsClusters:
+    engineering:
+      type: import
+      arn: arn:aws:ecs:ap-southeast-2:111122223333:cluster/engineering
+    runner-new:
+      type: create
+      name: engineering-dev-runners

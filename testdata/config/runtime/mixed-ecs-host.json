@@ -1,0 +1,167 @@
+{
+  "apiVersion": "runners.example/v1alpha1",
+  "config": {
+    "apiVersion": "runners.example/v1alpha1",
+    "kind": "RunnerController",
+    "metadata": {
+      "name": "engineering-dev"
+    },
+    "spec": {
+      "aws": {
+        "account": "111122223333",
+        "region": "ap-southeast-2"
+      },
+      "controller": {
+        "hosting": {
+          "cluster": "engineering",
+          "cpu": 512,
+          "cpuArchitecture": "x64",
+          "memoryMiB": 1024,
+          "network": "controller-private",
+          "type": "ecs-fargate"
+        },
+        "image": "111122223333.dkr.ecr.ap-southeast-2.amazonaws.com/controller@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      },
+      "dryRun": {
+        "demand": {
+          "type": "none"
+        },
+        "inspectAws": false
+      },
+      "ecsClusters": {
+        "engineering": {
+          "arn": "arn:aws:ecs:ap-southeast-2:111122223333:cluster/engineering",
+          "type": "import"
+        },
+        "runner-new": {
+          "name": "engineering-dev-runners",
+          "type": "create"
+        }
+      },
+      "github": {
+        "corporate": {
+          "auth": {
+            "secretArn": "arn:aws:secretsmanager:ap-southeast-2:111122223333:secret:github-enterprise-pat-a1b2c3",
+            "type": "enterprise-pat"
+          },
+          "scopeURL": "https://github.com/enterprises/example-corporate"
+        },
+        "engineering": {
+          "auth": {
+            "secretArn": "arn:aws:secretsmanager:ap-southeast-2:111122223333:secret:github-app-engineering-a1b2c3",
+            "type": "github-app"
+          },
+          "scopeURL": "https://github.com/example-engineering"
+        }
+      },
+      "mode": "dry-run",
+      "networks": {
+        "controller-private": {
+          "securityGroupIds": ["sg-0123456789abcdef0"],
+          "subnets": [
+            {
+              "az": "ap-southeast-2a",
+              "id": "subnet-0123456789abcdef0"
+            },
+            {
+              "az": "ap-southeast-2b",
+              "id": "subnet-0123456789abcdef1"
+            }
+          ],
+          "vpcId": "vpc-0123456789abcdef0"
+        },
+        "runner-private": {
+          "securityGroupIds": ["sg-0123456789abcdef1"],
+          "subnets": [
+            {
+              "az": "ap-southeast-2a",
+              "id": "subnet-0123456789abcdef2"
+            },
+            {
+              "az": "ap-southeast-2b",
+              "id": "subnet-0123456789abcdef3"
+            }
+          ],
+          "vpcId": "vpc-0123456789abcdef0"
+        }
+      },
+      "profiles": [
+        {
+          "capacity": {
+            "idleReserve": 0,
+            "maxRunners": 12,
+            "startupTimeoutSeconds": 600
+          },
+          "github": {
+            "connection": "engineering",
+            "labels": ["linux-docker"],
+            "registration": "existing",
+            "runnerGroup": "Linux-Docker",
+            "scaleSet": "linux-docker"
+          },
+          "id": "linux-docker",
+          "platform": {
+            "arch": "x64",
+            "os": "linux"
+          },
+          "provisioner": {
+            "bootstrapProtocol": "v1",
+            "bootstrapRoleArn": "arn:aws:iam::111122223333:role/runner-linux-bootstrap",
+            "capacityUnits": {
+              "type": "instances"
+            },
+            "groupArn": "arn:aws:autoscaling:ap-southeast-2:111122223333:autoScalingGroup:12345678-1234-1234-1234-123456789012:autoScalingGroupName/engineering-linux-docker",
+            "type": "asg"
+          },
+          "purpose": "docker",
+          "state": "active"
+        },
+        {
+          "capacity": {
+            "idleReserve": 0,
+            "maxRunners": 24,
+            "startupTimeoutSeconds": 600
+          },
+          "github": {
+            "connection": "corporate",
+            "labels": ["linux-shell"],
+            "registration": "create-if-missing",
+            "runnerGroup": "No-Docker",
+            "scaleSet": "linux-shell"
+          },
+          "id": "linux-shell",
+          "platform": {
+            "arch": "arm64",
+            "os": "linux"
+          },
+          "provisioner": {
+            "bootstrapProtocol": "v1",
+            "bootstrapRoleArn": "arn:aws:iam::111122223333:role/fargate-runner-bootstrap",
+            "cluster": "runner-new",
+            "executionRoleArn": "arn:aws:iam::111122223333:role/fargate-runner-execution",
+            "network": "runner-private",
+            "runnerContainer": "runner",
+            "taskDefinitionArn": "arn:aws:ecs:ap-southeast-2:111122223333:task-definition/linux-shell-runner:7",
+            "type": "fargate"
+          },
+          "purpose": "fargate-compatible",
+          "state": "active"
+        }
+      ],
+      "tracking": {
+        "table": {
+          "name": "existing-runner-lifecycle",
+          "type": "import"
+        }
+      }
+    }
+  },
+  "kind": "RunnerControllerRuntime",
+  "resources": {
+    "ecsClusterArns": {
+      "engineering": "arn:aws:ecs:ap-southeast-2:111122223333:cluster/engineering",
+      "runner-new": "arn:aws:ecs:ap-southeast-2:111122223333:cluster/engineering-dev-runners"
+    },
+    "trackingTableName": "existing-runner-lifecycle"
+  }
+}
