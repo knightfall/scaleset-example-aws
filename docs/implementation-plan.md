@@ -426,7 +426,9 @@ Each task defines a reviewable change and a check that can run before the next t
 
 ### Planned validation commands
 
-These commands are future implementation targets. Pin exact Go modules in `go.mod` and `go.sum` and CDK/TypeScript packages with `package-lock.json`. Run the same pinned tooling and checks locally and in CI, including the SDK contract tests on dependency upgrades.
+Run `make check` locally with the Go version in `go.mod` and the Node version in `.node-version`. This is also the CI entry point. The repository pins the SDK modules, npm dependencies, and container bases in `go.mod`, `go.sum`, `cdk/package-lock.json`, and `build/images.env`. The command verifies module integrity, checks formatting, lints and tests Go packages as they are added, and runs the TypeScript checks and offline CDK synthesis test. Run the SDK contract tests on dependency upgrades.
+
+The following commands also show the individual checks and the planned Docker build once the controller image is implemented.
 
 ```sh
 go mod verify
