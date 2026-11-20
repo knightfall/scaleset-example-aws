@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -48,7 +49,13 @@ func (d *database) TransactWriteItems(_ context.Context, input *dynamodb.Transac
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.lastTxn = input
-	for _, tx := range input.TransactItems {
+	for index, tx := range input.TransactItems {
+		if tx.ConditionCheck != nil {
+			if !d.leaseMatches(tx.ConditionCheck) {
+				return nil, cancelledCondition(index, len(input.TransactItems))
+			}
+			continue
+		}
 		put := tx.Put
 		if put == nil || aws.ToString(put.TableName) != "state" {
 			return nil, errors.New("expected a write to the lifecycle table")
@@ -66,15 +73,35 @@ func (d *database) TransactWriteItems(_ context.Context, input *dynamodb.Transac
 			return nil, errors.New("unexpected revision condition")
 		}
 		if !matches {
-			return nil, &types.TransactionCanceledException{
-				CancellationReasons: []types.CancellationReason{{Code: aws.String("ConditionalCheckFailed")}},
-			}
+			return nil, cancelledCondition(index, len(input.TransactItems))
 		}
 	}
 	for _, tx := range input.TransactItems {
-		d.items[keyOf(tx.Put.Item)] = tx.Put.Item
+		if tx.Put != nil {
+			d.items[keyOf(tx.Put.Item)] = tx.Put.Item
+		}
 	}
 	return &dynamodb.TransactWriteItemsOutput{}, nil
+}
+
+func cancelledCondition(index, count int) error {
+	reasons := make([]types.CancellationReason, count)
+	reasons[index].Code = aws.String("ConditionalCheckFailed")
+	return &types.TransactionCanceledException{CancellationReasons: reasons}
+}
+
+func (d *database) leaseMatches(check *types.ConditionCheck) bool {
+	record := d.items[keyOf(check.Key)]
+	if record == nil || aws.ToString(check.ConditionExpression) != "#owner = :owner AND #epoch = :epoch AND #phase = :phase AND #until > :now" {
+		return false
+	}
+	values := check.ExpressionAttributeValues
+	until, untilErr := strconv.ParseInt(numberValue(record["leaseUntilMillis"]), 10, 64)
+	now, nowErr := strconv.ParseInt(numberValue(values[":now"]), 10, 64)
+	return untilErr == nil && nowErr == nil && until > now &&
+		stringValue(record["leaseOwner"]) == stringValue(values[":owner"]) &&
+		numberValue(record["leaseEpoch"]) == numberValue(values[":epoch"]) &&
+		stringValue(record["leasePhase"]) == stringValue(values[":phase"])
 }
 
 func keyOf(item attributes) lifecycle.Key {
