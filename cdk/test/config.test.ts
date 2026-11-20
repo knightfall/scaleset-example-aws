@@ -34,6 +34,36 @@ test("the authored fixtures produce the shared runtime fixtures", () => {
   }
 });
 
+const rejections: {
+  name: string;
+  fixture: string;
+  path: string;
+  value: string | number;
+  yamlError: string;
+}[] = JSON.parse(readFileSync(join(fixtures, "rejections.json"), "utf8"));
+
+for (const rejection of rejections) {
+  test(`shared rejection: ${rejection.name}`, () => {
+    const { runtime } = loadEnvironmentConfig(
+      join(fixtures, `${rejection.fixture}.yaml`),
+    );
+    const path = rejection.path.split(".");
+    const key = path.pop();
+    assert.ok(key);
+    const configuration: Record<string, unknown> = { ...runtime.config };
+    let object = configuration;
+    for (const item of path) object = object[item] as Record<string, unknown>;
+    object[key] = rejection.value;
+    assert.throws(
+      () => compileEnvironmentConfig(stringify(configuration)),
+      (error: Error) => {
+        assert.ok(error.message.includes(rejection.yamlError), error.message);
+        return true;
+      },
+    );
+  });
+}
+
 test("ASG-only YAML resolves without ECS settings and defaults to dry-run", () => {
   const { runtime, json, sha256 } = loadEnvironmentConfig(asg);
   assert.equal(runtime.config.spec.mode, "dry-run");

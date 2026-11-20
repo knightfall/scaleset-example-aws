@@ -17,6 +17,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.51.0
 	github.com/aws/aws-sdk-go-v2/service/sqs v1.53.0
 	github.com/aws/aws-sdk-go-v2/service/sts v1.53.0
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 )
 
 require (
@@ -37,4 +38,5 @@ require (
 	github.com/aws/smithy-go v1.28.9 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 )

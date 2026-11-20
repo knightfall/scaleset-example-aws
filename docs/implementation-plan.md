@@ -98,6 +98,8 @@ npm --prefix cdk run config:emit -- ../testdata/config/asg-only-external.yaml /t
 
 The runtime envelope contains the normalized `config`, the resolved tracking table name, and the ARNs of selected ECS clusters. Its bytes are independent of YAML comments and mapping key order. The shared YAML and runtime fixtures in `testdata/config/` cover ASG-only, Fargate-only, and mixed environments. For a custom GHES host, `spec.github.<connection>.caBundlePath` identifies the trusted CA file supplied by the controller host.
 
+Validate the emitted artifact with `go run . config verify --file /tmp/runner-runtime.json --sha256 <digest>`. The command checks the exact bytes against the supplied digest and prints the environment, mode and selected runner backends. It uses the schemas embedded from `cdk/config/schema/` and performs no AWS or GitHub calls.
+
 ### EC2-only example on an existing external Docker host
 
 Identifiers are illustrative and belong only to capabilities shown in the example.
