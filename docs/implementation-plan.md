@@ -18,7 +18,7 @@ The application worktree starts at `e751880` with only `.gitignore` tracked. The
 
 ### Offline SDK contract tests
 
-The fixtures in `internal/sdkcontract` drive the pinned SDK clients through scripted HTTP exchanges. All endpoints, credentials and responses are test data. Unexpected requests fail the test, so the fixtures can check wire counts after an ambiguous response.
+The tests in `tests/sdkcontract` drive the pinned SDK clients through scripted HTTP exchanges. All endpoints, credentials and responses are test data. Unexpected requests fail the test, so the fixtures can check wire counts after an ambiguous response.
 
 | SDK surface | Offline evidence |
 | --- | --- |
@@ -27,11 +27,13 @@ The fixtures in `internal/sdkcontract` drive the pinned SDK clients through scri
 | AWS execution | ASG inventory, weighted capacity and protection fields, single-attempt desired-capacity writes and targeted termination. ECS cluster and task revision preflight, count-one launch, identical explicit-token replay, task lookup and stop. Fixtures cover the wire format and response parsing. Live tests cover scale-in behavior, idempotency expiry and eventually consistent recovery. |
 | AWS supporting services | EC2 instance and launch-template reads, DynamoDB transaction and conditional one-time handoff, Secrets Manager version selection, IAM role IDs, STS caller IDs, versioned S3 reads, and SQS receipt handling. IAM and per-executor identity isolation still require the live checks in section 11. |
 
-Run the suite with `go test -race ./internal/sdkcontract` using the pinned Go toolchain. Re-run it when upgrading either SDK. Section 11 lists the service behaviors that require a sandbox canary.
+Run the suite with `go test -race ./tests/sdkcontract` using the pinned Go toolchain. Re-run it when upgrading either SDK. Section 11 lists the service behaviors that require a sandbox canary.
 
 ## 2. Architecture and ownership
 
 One Dockerised Go controller runs independent concurrent listener and reconciliation workers. Each profile owns one homogeneous GitHub scale set and one execution backend. The shared table holds lifecycle and ownership, while GitHub supplies job demand. AWS inventory and lifecycle events supply resource observations. Use one AWS account and Region per controller deployment initially. Deploy separate controller environments for other accounts or Regions.
+
+The controller has one Go entry point at the repository root. `main.go` wires together packages named for their features. The repository layout and test placement conventions are documented in `AGENTS.md`.
 
 ```mermaid
 flowchart LR
@@ -478,9 +480,9 @@ npx --no-install cdk diff --method=template -c config=config/sandbox.yaml
 Use the template diff for read-only comparison. Review a change-set diff for replacement analysis before any approved rollout. After an approved sandbox rollout, validate read-only plans and exercise the sandbox migration and rollback procedure. Pin integration resources to test accounts and repositories and require explicit credentials and environment opt-in for the test harness. [CDK diff modes](https://docs.aws.amazon.com/cdk/v2/guide/ref-cli-cmd-diff.html)
 
 ```sh
-go run ./cmd/controller config verify --file ./out/runtime.json
-go run ./cmd/controller reconcile --config ./out/runtime.json --dry-run --once
-go test -tags=integration ./integration/... -count=1
+go run . config verify --file ./out/runtime.json
+go run . reconcile --config ./out/runtime.json --dry-run --once
+go test -tags=integration ./tests/integration/... -count=1
 ```
 
 ## 11. Verification gates and decisions for review

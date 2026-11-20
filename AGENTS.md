@@ -17,6 +17,13 @@
 - Ensure provisioning and cleanup are idempotent and concurrency-safe.
 - Never terminate active runners or expose credentials.
 
+## Repository Layout
+
+- Wire the single Go controller in the root `main.go`. Keep supporting packages flat and name them for the feature they own.
+- Put Go SDK contract and other black-box suites in `tests/`. Keep a Go unit test next to its package when it needs access to unexported behavior.
+- Keep CDK entry points in `cdk/bin/`, implementation in `cdk/lib/`, environment YAML and schemas in `cdk/config/`, and TypeScript tests in `cdk/test/`.
+- Keep shared YAML and JSON test fixtures in `testdata/config/`.
+
 ## Code Quality
 
 - **Go:** `gofmt`, `go vet`, `golangci-lint`, `go test -race ./...`.
