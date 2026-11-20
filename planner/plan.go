@@ -76,40 +76,49 @@ func Calculate(limits Limits, demand *Demand, inventory *Inventory, now time.Tim
 			return result, errors.New("invalid demand observation")
 		}
 		result.DemandStatus = "stale"
-		result.Assigned, result.Running = new(demand.Assigned), new(demand.Running)
+		assigned, running := demand.Assigned, demand.Running
+		result.Assigned = &assigned
+		result.Running = &running
 		if fresh(demand.ObservedAt, now, maxAge) {
 			result.DemandStatus = "fresh"
 		}
 	}
 	if inventory != nil {
-		if err := result.observe(limits, inventory, now, maxAge); err != nil {
+		if err := result.observe(limits, *inventory, now, maxAge); err != nil {
 			return result, err
 		}
 	}
 	result.EffectiveReserve = min(result.EffectiveReserve, result.EffectiveMax)
-	if result.DemandStatus == "fresh" {
-		assigned := min(*result.Assigned, result.EffectiveMax)
-		target := assigned + min(result.EffectiveReserve, result.EffectiveMax-assigned)
-		result.Target = &target
-	} else {
+	demandFresh := demand != nil && result.DemandStatus == "fresh"
+	inventoryFresh := result.InventoryStatus == "fresh"
+	if !demandFresh {
 		result.Blockers = append(result.Blockers, "demand "+result.DemandStatus)
 	}
-	if result.InventoryStatus != "fresh" {
+	if !inventoryFresh {
 		result.Blockers = append(result.Blockers, "inventory "+result.InventoryStatus)
 	}
-	if result.Target != nil && result.InventoryStatus == "fresh" {
-		unmapped := max(0, *result.Running-*result.Busy)
-		result.UnmappedRunning = &unmapped
-		deficit := max(0, *result.Target-*result.Serving-*result.CrediblePending-unmapped)
-		result.Deficit = &deficit
-		if unmapped > 0 {
-			result.Blockers = append(result.Blockers, "running jobs lack matched executors")
-			return result, nil
-		}
-		result.ProposedStarts = min(deficit, *result.Headroom)
-		if result.ProposedStarts < deficit {
-			result.Blockers = append(result.Blockers, "capacity limit reached")
-		}
+	if !demandFresh {
+		return result, nil
+	}
+
+	assigned := min(demand.Assigned, result.EffectiveMax)
+	target := assigned + min(result.EffectiveReserve, result.EffectiveMax-assigned)
+	result.Target = &target
+	if !inventoryFresh {
+		return result, nil
+	}
+
+	unmapped := max(0, demand.Running-*result.Busy)
+	result.UnmappedRunning = &unmapped
+	deficit := max(0, target-*result.Serving-*result.CrediblePending-unmapped)
+	result.Deficit = &deficit
+	if unmapped > 0 {
+		result.Blockers = append(result.Blockers, "running jobs lack matched executors")
+		return result, nil
+	}
+	result.ProposedStarts = min(deficit, *result.Headroom)
+	if result.ProposedStarts < deficit {
+		result.Blockers = append(result.Blockers, "capacity limit reached")
 	}
 	return result, nil
 }
@@ -118,19 +127,21 @@ func fresh(observedAt, now time.Time, maxAge time.Duration) bool {
 	return !observedAt.After(now) && now.Sub(observedAt) <= maxAge
 }
 
-func (r *Result) observe(limits Limits, inventory *Inventory, now time.Time, maxAge time.Duration) error {
+func (r *Result) observe(limits Limits, inventory Inventory, now time.Time, maxAge time.Duration) error {
 	if inventory.ObservedAt.IsZero() || (inventory.BackendLimit != nil && *inventory.BackendLimit < 0) {
 		return errors.New("invalid inventory observation")
 	}
-	r.InventoryStatus = "stale"
-	if fresh(inventory.ObservedAt, now, maxAge) {
+	isCurrent := fresh(inventory.ObservedAt, now, maxAge)
+	switch {
+	case !isCurrent:
+		r.InventoryStatus = "stale"
+	case inventory.Complete:
+		r.InventoryStatus = "fresh"
+	default:
 		r.InventoryStatus = "partial"
-		if inventory.Complete {
-			r.InventoryStatus = "fresh"
-		}
-		if inventory.BackendLimit != nil {
-			r.EffectiveMax = min(r.EffectiveMax, *inventory.BackendLimit)
-		}
+	}
+	if isCurrent && inventory.BackendLimit != nil {
+		r.EffectiveMax = min(r.EffectiveMax, *inventory.BackendLimit)
 	}
 	seen := make(map[string]bool)
 	var serving, busy, pending, occupied, unknown int
@@ -140,12 +151,11 @@ func (r *Result) observe(limits Limits, inventory *Inventory, now time.Time, max
 		}
 		seen[executor.ID] = true
 		switch executor.State {
-		case "lost", "busy", "idle", "starting", "unknown", "completed", "unused":
+		case "lost":
+			continue
+		case "busy", "idle", "starting", "unknown", "completed", "unused":
 		default:
 			return fmt.Errorf("invalid executor state for %s", executor.ID)
-		}
-		if executor.State == "lost" {
-			continue
 		}
 		occupied++
 		if !executor.Owned {
@@ -154,11 +164,11 @@ func (r *Result) observe(limits Limits, inventory *Inventory, now time.Time, max
 			continue
 		}
 		switch executor.State {
-		case "busy", "idle":
+		case "busy":
+			busy++
 			serving++
-			if executor.State == "busy" {
-				busy++
-			}
+		case "idle":
+			serving++
 		case "starting":
 			if executor.StartedAt.IsZero() || executor.StartedAt.After(inventory.ObservedAt) {
 				return fmt.Errorf("missing or invalid start time for %s", executor.ID)
@@ -181,7 +191,8 @@ func (r *Result) observe(limits Limits, inventory *Inventory, now time.Time, max
 	r.Serving, r.Busy, r.CrediblePending = &serving, &busy, &pending
 	r.Occupied, r.Unknown = &occupied, &unknown
 	if r.InventoryStatus == "fresh" {
-		r.Headroom = new(max(0, r.EffectiveMax-occupied))
+		headroom := max(0, r.EffectiveMax-occupied)
+		r.Headroom = &headroom
 	}
 	return nil
 }

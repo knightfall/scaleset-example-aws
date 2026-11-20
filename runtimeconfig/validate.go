@@ -210,8 +210,14 @@ func (b *deploymentBindings) checkExecution(profile Profile, scope string, contr
 		return err
 	}
 	boundary := trustBoundary{
-		scope, strings.ToLower(profile.GitHub.RunnerGroup), profile.Purpose, profile.Platform.OS, profile.Platform.Arch,
-		provider.RunnerContainer, provider.BootstrapRoleARN, provider.ExecutionRoleARN,
+		scope:         scope,
+		group:         strings.ToLower(profile.GitHub.RunnerGroup),
+		purpose:       profile.Purpose,
+		os:            profile.Platform.OS,
+		arch:          profile.Platform.Arch,
+		container:     provider.RunnerContainer,
+		bootstrapRole: provider.BootstrapRoleARN,
+		executionRole: provider.ExecutionRoleARN,
 	}
 	if previous, ok := b.taskDefinitions[provider.TaskDefinitionARN]; ok && previous != boundary {
 		return fmt.Errorf("profile %s shares a task definition across incompatible runner profiles", profile.ID)
