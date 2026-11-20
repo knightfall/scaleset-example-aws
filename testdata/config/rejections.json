@@ -1,0 +1,34 @@
+[
+  {
+    "name": "unknown API version",
+    "fixture": "asg-only-external",
+    "path": "apiVersion",
+    "value": "runners.example/v2",
+    "yamlError": "apiVersion",
+    "runtimeError": "v1alpha1 schema"
+  },
+  {
+    "name": "enterprise PAT with organisation scope",
+    "fixture": "fargate-only-import",
+    "path": "spec.github.corporate.scopeURL",
+    "value": "https://github.com/example-org",
+    "yamlError": "incompatible credential type",
+    "runtimeError": "incompatible with the scope"
+  },
+  {
+    "name": "invalid controller Fargate memory",
+    "fixture": "fargate-only-import",
+    "path": "spec.controller.hosting.memoryMiB",
+    "value": 1536,
+    "yamlError": "invalid Fargate CPU and memory",
+    "runtimeError": "invalid Fargate CPU and memory"
+  },
+  {
+    "name": "unknown selected controller cluster",
+    "fixture": "mixed-ecs-host",
+    "path": "spec.controller.hosting.cluster",
+    "value": "missing",
+    "yamlError": "missing entry missing",
+    "runtimeError": "missing ECS cluster missing"
+  }
+]

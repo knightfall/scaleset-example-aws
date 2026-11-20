@@ -187,7 +187,7 @@
     "path": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^/[^\\u0000]+$"
+      "pattern": "^/[^\\x00]+$"
     },
     "s3Input": {
       "type": "object",
