@@ -11,6 +11,7 @@
 ## Architecture
 
 - Use the official `actions/scaleset` SDK and AWS SDK for Go v2.
+- Keep reconciliation rules independent of provider SDK types. Keep SDK calls and request translation in provider and persistence adapters.
 - Keep runner profiles configuration-driven through validated YAML.
 - Initialise only enabled AWS provisioners.
 - Reuse existing infrastructure; avoid destructive CDK changes.
@@ -29,6 +30,7 @@
 - **Go:** `gofmt`, `go vet`, `golangci-lint`, `go test -race ./...`.
 - **TypeScript/CDK:** strict TypeScript, ESLint, Prettier, `tsc --noEmit`, `cdk synth`.
 - Handle errors explicitly; never silently suppress lint failures.
+- Use guard clauses to keep the main path shallow. Use `range` for Go collection loops and braces for TypeScript loop bodies.
 - Write meaningful tests for changed behaviour.
 - Pin tool versions and use the same checks in CI.
 

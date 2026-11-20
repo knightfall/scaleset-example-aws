@@ -27,47 +27,11 @@ func (s *Store) Due(ctx context.Context, deployment string, before time.Time, li
 	var records []Record
 	seen := make(map[Key]bool)
 	for shard := range dueShards {
-		input := &dynamodb.QueryInput{
-			TableName: aws.String(s.table), IndexName: aws.String(DueIndexName),
-			Limit: aws.Int32(limit), ScanIndexForward: aws.Bool(true),
-			KeyConditionExpression:   aws.String("#shard = :shard AND #due <= :before"),
-			ExpressionAttributeNames: map[string]string{"#shard": DuePartition, "#due": DueSort},
-			ExpressionAttributeValues: map[string]types.AttributeValue{
-				":shard":  text(duePartitionKey(deployment, shard)),
-				":before": number(before.UnixMilli()),
-			},
-			ProjectionExpression: aws.String("PK, SK"),
+		batch, err := s.dueInShard(ctx, deployment, shard, before, limit, seen)
+		if err != nil {
+			return nil, err
 		}
-		var accepted int32
-		for accepted < limit {
-			page, err := s.db.Query(ctx, input)
-			if err != nil {
-				return nil, fmt.Errorf("discover due lifecycle records: %w", err)
-			}
-			for _, item := range page.Items {
-				key := readKey(item)
-				if seen[key] {
-					continue
-				}
-				seen[key] = true
-				record, err := s.Get(ctx, key)
-				if err != nil {
-					return nil, err
-				}
-				if record == nil || record.Deployment != deployment || record.DueAt.IsZero() || record.DueAt.After(before) {
-					continue
-				}
-				records = append(records, *record)
-				accepted++
-				if accepted == limit {
-					break
-				}
-			}
-			if len(page.LastEvaluatedKey) == 0 {
-				break
-			}
-			input.ExclusiveStartKey = page.LastEvaluatedKey
-		}
+		records = append(records, batch...)
 	}
 	slices.SortFunc(records, func(a, b Record) int {
 		if order := a.DueAt.Compare(b.DueAt); order != 0 {
@@ -82,4 +46,47 @@ func (s *Store) Due(ctx context.Context, deployment string, before time.Time, li
 		records = records[:limit]
 	}
 	return records, nil
+}
+
+func (s *Store) dueInShard(ctx context.Context, deployment string, shard int, before time.Time, limit int32, seen map[Key]bool) ([]Record, error) {
+	input := &dynamodb.QueryInput{
+		TableName: aws.String(s.table), IndexName: aws.String(DueIndexName),
+		Limit: aws.Int32(limit), ScanIndexForward: aws.Bool(true),
+		KeyConditionExpression:   aws.String("#shard = :shard AND #due <= :before"),
+		ExpressionAttributeNames: map[string]string{"#shard": DuePartition, "#due": DueSort},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":shard":  text(duePartitionKey(deployment, shard)),
+			":before": number(before.UnixMilli()),
+		},
+		ProjectionExpression: aws.String("PK, SK"),
+	}
+	var records []Record
+	for {
+		page, err := s.db.Query(ctx, input)
+		if err != nil {
+			return nil, fmt.Errorf("discover due lifecycle records: %w", err)
+		}
+		for _, item := range page.Items {
+			key := readKey(item)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			record, err := s.Get(ctx, key)
+			if err != nil {
+				return nil, err
+			}
+			if record == nil || record.Deployment != deployment || record.DueAt.IsZero() || record.DueAt.After(before) {
+				continue
+			}
+			records = append(records, *record)
+			if len(records) == int(limit) {
+				return records, nil
+			}
+		}
+		if len(page.LastEvaluatedKey) == 0 {
+			return records, nil
+		}
+		input.ExclusiveStartKey = page.LastEvaluatedKey
+	}
 }
