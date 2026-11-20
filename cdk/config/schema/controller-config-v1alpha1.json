@@ -1,0 +1,739 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://runners.example/schemas/controller-config-v1alpha1.json",
+  "title": "RunnerController environment configuration",
+  "type": "object",
+  "properties": {
+    "apiVersion": {
+      "const": "runners.example/v1alpha1"
+    },
+    "kind": {
+      "const": "RunnerController"
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": ["name"],
+      "additionalProperties": false
+    },
+    "spec": {
+      "type": "object",
+      "properties": {
+        "aws": {
+          "type": "object",
+          "properties": {
+            "account": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[0-9]{12}$"
+            },
+            "region": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z]{2}(?:-[a-z0-9]+)+-[0-9]+$"
+            }
+          },
+          "required": ["account", "region"],
+          "additionalProperties": false
+        },
+        "mode": {
+          "enum": ["dry-run", "active"],
+          "default": "dry-run"
+        },
+        "dryRun": {
+          "$ref": "#/$defs/dryRun"
+        },
+        "controller": {
+          "type": "object",
+          "properties": {
+            "image": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[a-f0-9]{64}$"
+            },
+            "hosting": {
+              "$ref": "#/$defs/hosting"
+            }
+          },
+          "required": ["image", "hosting"],
+          "additionalProperties": false
+        },
+        "tracking": {
+          "type": "object",
+          "properties": {
+            "table": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "const": "create"
+                    }
+                  },
+                  "required": ["type"],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "const": "import"
+                    },
+                    "name": {
+                      "$ref": "#/$defs/tableName"
+                    }
+                  },
+                  "required": ["type", "name"],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": ["table"],
+          "additionalProperties": false
+        },
+        "github": {
+          "minProperties": 1,
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/id"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/githubConnection"
+          }
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/profile"
+          },
+          "minItems": 1,
+          "uniqueItems": true,
+          "contains": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "enum": ["active", "draining"]
+              }
+            },
+            "required": ["state"]
+          }
+        },
+        "networks": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/id"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/network"
+          }
+        },
+        "ecsClusters": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/id"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/cluster"
+          }
+        }
+      },
+      "required": ["aws", "controller", "tracking", "github", "profiles"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "additionalProperties": false,
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+    },
+    "selector": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$"
+    },
+    "digest": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "roleArn": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^arn:aws(?:-[a-z0-9-]+)?:iam::[0-9]{12}:role/[A-Za-z0-9_+=,.@/-]+$"
+    },
+    "secretArn": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^arn:aws(?:-[a-z0-9-]+)?:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9_+=,.@/-]+-[A-Za-z0-9]{6}$"
+    },
+    "clusterArn": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^arn:aws(?:-[a-z0-9-]+)?:ecs:[a-z0-9-]+:[0-9]{12}:cluster/[A-Za-z0-9_-]{1,255}$"
+    },
+    "tableName": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_.-]{3,255}$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/[^\\u0000]+$"
+    },
+    "s3Input": {
+      "type": "object",
+      "properties": {
+        "bucket": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "versionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": ["bucket", "key", "sha256"],
+      "additionalProperties": false
+    },
+    "dryRun": {
+      "type": "object",
+      "properties": {
+        "inspectAws": {
+          "type": "boolean",
+          "default": false
+        },
+        "demand": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "none"
+                }
+              },
+              "required": ["type"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "snapshot"
+                },
+                "path": {
+                  "$ref": "#/$defs/path"
+                }
+              },
+              "required": ["type", "path"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "snapshot"
+                },
+                "s3": {
+                  "$ref": "#/$defs/s3Input"
+                }
+              },
+              "required": ["type", "s3"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "replay"
+                },
+                "path": {
+                  "$ref": "#/$defs/path"
+                }
+              },
+              "required": ["type", "path"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "replay"
+                },
+                "s3": {
+                  "$ref": "#/$defs/s3Input"
+                }
+              },
+              "required": ["type", "s3"],
+              "additionalProperties": false
+            }
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "githubConnection": {
+      "type": "object",
+      "properties": {
+        "scopeURL": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "auth": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "github-app"
+                },
+                "secretArn": {
+                  "$ref": "#/$defs/secretArn"
+                }
+              },
+              "required": ["type", "secretArn"],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "enterprise-pat"
+                },
+                "secretArn": {
+                  "$ref": "#/$defs/secretArn"
+                }
+              },
+              "required": ["type", "secretArn"],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "caBundlePath": {
+          "$ref": "#/$defs/path"
+        }
+      },
+      "required": ["scopeURL", "auth"],
+      "additionalProperties": false
+    },
+    "githubBinding": {
+      "type": "object",
+      "properties": {
+        "connection": {
+          "$ref": "#/$defs/id"
+        },
+        "runnerGroup": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "scaleSet": {
+          "$ref": "#/$defs/selector"
+        },
+        "scaleSetId": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/selector"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "registration": {
+          "enum": ["existing", "create-if-missing"],
+          "default": "existing"
+        }
+      },
+      "required": ["connection", "runnerGroup", "scaleSet", "labels"],
+      "additionalProperties": false
+    },
+    "network": {
+      "type": "object",
+      "properties": {
+        "vpcId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^vpc-(?:[a-f0-9]{8}|[a-f0-9]{17})$"
+        },
+        "subnets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^subnet-(?:[a-f0-9]{8}|[a-f0-9]{17})$"
+              },
+              "az": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            },
+            "required": ["id", "az"],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "uniqueItems": true,
+          "maxItems": 16
+        },
+        "securityGroupIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^sg-(?:[a-f0-9]{8}|[a-f0-9]{17})$"
+          },
+          "minItems": 1,
+          "uniqueItems": true,
+          "maxItems": 5
+        }
+      },
+      "required": ["vpcId", "subnets", "securityGroupIds"],
+      "additionalProperties": false
+    },
+    "cluster": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "create"
+            },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]{1,255}$"
+            }
+          },
+          "required": ["type", "name"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "import"
+            },
+            "arn": {
+              "$ref": "#/$defs/clusterArn"
+            }
+          },
+          "required": ["type", "arn"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "externalIdentity": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "ec2-instance-profile"
+            },
+            "principalRoleArn": {
+              "$ref": "#/$defs/roleArn"
+            },
+            "assumeRoleArn": {
+              "$ref": "#/$defs/roleArn"
+            }
+          },
+          "required": ["type", "principalRoleArn"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "roles-anywhere"
+            },
+            "trustAnchorArn": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^arn:aws(?:-[a-z0-9-]+)?:rolesanywhere:[a-z0-9-]+:[0-9]{12}:trust-anchor/[a-f0-9-]{36}$"
+            },
+            "profileArn": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^arn:aws(?:-[a-z0-9-]+)?:rolesanywhere:[a-z0-9-]+:[0-9]{12}:profile/[a-f0-9-]{36}$"
+            },
+            "roleArn": {
+              "$ref": "#/$defs/roleArn"
+            }
+          },
+          "required": ["type", "trustAnchorArn", "profileArn", "roleArn"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "hosting": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "external"
+            },
+            "identity": {
+              "$ref": "#/$defs/externalIdentity"
+            }
+          },
+          "required": ["type", "identity"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "ec2"
+            },
+            "network": {
+              "$ref": "#/$defs/id"
+            },
+            "amiId": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^ami-(?:[a-f0-9]{8}|[a-f0-9]{17})$"
+            },
+            "instanceType": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[a-z0-9]+\\.[a-z0-9]+$"
+            }
+          },
+          "required": ["type", "network", "amiId", "instanceType"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "ecs-fargate"
+            },
+            "network": {
+              "$ref": "#/$defs/id"
+            },
+            "cluster": {
+              "$ref": "#/$defs/id"
+            },
+            "cpuArchitecture": {
+              "enum": ["x64", "arm64"]
+            },
+            "cpu": {
+              "enum": [256, 512, 1024, 2048, 4096, 8192, 16384]
+            },
+            "memoryMiB": {
+              "type": "integer",
+              "minimum": 512,
+              "maximum": 122880
+            }
+          },
+          "required": [
+            "type",
+            "network",
+            "cluster",
+            "cpuArchitecture",
+            "cpu",
+            "memoryMiB"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "provisioner": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "asg"
+            },
+            "groupArn": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^arn:aws(?:-[a-z0-9-]+)?:autoscaling:[a-z0-9-]+:[0-9]{12}:autoScalingGroup:[0-9a-fA-F-]{36}:autoScalingGroupName/[A-Za-z0-9_.+=,@:-]+$"
+            },
+            "capacityUnits": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "const": "instances"
+                    }
+                  },
+                  "required": ["type"],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "const": "fixed-weight"
+                    },
+                    "weight": {
+                      "type": "integer",
+                      "minimum": 1,
+                      "maximum": 999
+                    }
+                  },
+                  "required": ["type", "weight"],
+                  "additionalProperties": false
+                }
+              ]
+            },
+            "bootstrapRoleArn": {
+              "$ref": "#/$defs/roleArn"
+            },
+            "bootstrapProtocol": {
+              "const": "v1"
+            }
+          },
+          "required": [
+            "type",
+            "groupArn",
+            "capacityUnits",
+            "bootstrapRoleArn",
+            "bootstrapProtocol"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "fargate"
+            },
+            "cluster": {
+              "$ref": "#/$defs/id"
+            },
+            "network": {
+              "$ref": "#/$defs/id"
+            },
+            "taskDefinitionArn": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^arn:aws(?:-[a-z0-9-]+)?:ecs:[a-z0-9-]+:[0-9]{12}:task-definition/[A-Za-z0-9_-]{1,255}:[1-9][0-9]*$"
+            },
+            "runnerContainer": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9_-]{1,255}$"
+            },
+            "bootstrapRoleArn": {
+              "$ref": "#/$defs/roleArn"
+            },
+            "executionRoleArn": {
+              "$ref": "#/$defs/roleArn"
+            },
+            "bootstrapProtocol": {
+              "const": "v1"
+            }
+          },
+          "required": [
+            "type",
+            "cluster",
+            "network",
+            "taskDefinitionArn",
+            "runnerContainer",
+            "bootstrapRoleArn",
+            "executionRoleArn",
+            "bootstrapProtocol"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "profile": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "state": {
+          "enum": ["active", "draining", "disabled"]
+        },
+        "purpose": {
+          "enum": ["docker", "copilot-cloud-agent", "fargate-compatible"]
+        },
+        "platform": {
+          "type": "object",
+          "properties": {
+            "os": {
+              "enum": ["linux", "windows"]
+            },
+            "arch": {
+              "enum": ["x64", "arm64"]
+            }
+          },
+          "required": ["os", "arch"],
+          "additionalProperties": false
+        },
+        "capacity": {
+          "type": "object",
+          "properties": {
+            "idleReserve": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            "maxRunners": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2147483647
+            },
+            "startupTimeoutSeconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400
+            }
+          },
+          "required": ["idleReserve", "maxRunners", "startupTimeoutSeconds"],
+          "additionalProperties": false
+        },
+        "github": {
+          "$ref": "#/$defs/githubBinding"
+        },
+        "provisioner": {
+          "$ref": "#/$defs/provisioner"
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "purpose",
+        "platform",
+        "capacity",
+        "github",
+        "provisioner"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
