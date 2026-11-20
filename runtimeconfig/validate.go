@@ -20,21 +20,42 @@ func (a Artifact) validate() error {
 	}
 
 	bindings := deploymentBindings{
-		spec:          spec,
-		clusters:      make(map[string]string),
-		clusterOwners: make(map[string]bool),
-		subnets:       make(map[string]subnetMapping),
-		groupVPCs:     make(map[string]string),
+		spec:            spec,
+		clusters:        make(map[string]string),
+		clusterOwners:   make(map[string]bool),
+		subnets:         make(map[string]subnetMapping),
+		groupVPCs:       make(map[string]string),
+		asgOwners:       make(map[string]bool),
+		taskDefinitions: make(map[string]trustBoundary),
 	}
 	controllerRoles, err := bindings.checkHost()
 	if err != nil {
 		return err
 	}
+	scopes, err := checkGitHubProfiles(spec)
+	if err != nil {
+		return err
+	}
+	for _, profile := range spec.Profiles {
+		if profile.State == "disabled" {
+			continue
+		}
+		if err := bindings.checkExecution(profile, scopes[profile.GitHub.Connection], controllerRoles); err != nil {
+			return err
+		}
+	}
+	if !maps.Equal(bindings.clusters, a.Resources.ECSClusterARNs) {
+		return errors.New("resolved ECS clusters do not match selected configuration")
+	}
+	return nil
+}
+
+func checkGitHubProfiles(spec Spec) (map[string]string, error) {
 	scopes := make(map[string]string, len(spec.GitHub))
 	for name, connection := range spec.GitHub {
 		scope, err := connection.scope()
 		if err != nil {
-			return fmt.Errorf("GitHub connection %s: %w", name, err)
+			return nil, fmt.Errorf("GitHub connection %s: %w", name, err)
 		}
 		scopes[name] = scope
 	}
@@ -45,22 +66,17 @@ func (a Artifact) validate() error {
 		id    int64
 	}
 	type selector struct{ scope, label string }
-	type trustBoundary struct {
-		scope, group, purpose, os, arch, container, bootstrapRole, executionRole string
-	}
 	profileIDs := make(map[string]bool)
-	asgOwners := make(map[string]bool)
 	setNames := make(map[setName]bool)
 	setIDs := make(map[setID]bool)
 	selectors := make(map[selector]bool)
-	taskDefinitions := make(map[string]trustBoundary)
 	for _, profile := range spec.Profiles {
 		if profileIDs[profile.ID] {
-			return fmt.Errorf("conflicting profile ID: %s", profile.ID)
+			return nil, fmt.Errorf("conflicting profile ID: %s", profile.ID)
 		}
 		profileIDs[profile.ID] = true
 		if err := profile.validate(); err != nil {
-			return fmt.Errorf("profile %s: %w", profile.ID, err)
+			return nil, fmt.Errorf("profile %s: %w", profile.ID, err)
 		}
 		if profile.State == "disabled" {
 			continue
@@ -69,65 +85,33 @@ func (a Artifact) validate() error {
 		github := profile.GitHub
 		scope, ok := scopes[github.Connection]
 		if !ok {
-			return fmt.Errorf("profile %s references a missing GitHub connection", profile.ID)
+			return nil, fmt.Errorf("profile %s references a missing GitHub connection", profile.ID)
 		}
 		if err := spec.AWS.checkARN(spec.GitHub[github.Connection].Auth.SecretARN, "GitHub secret ARN"); err != nil {
-			return err
+			return nil, err
 		}
 		group := strings.ToLower(github.RunnerGroup)
 		name := setName{scope, group, strings.ToLower(github.ScaleSet)}
 		if setNames[name] {
-			return fmt.Errorf("conflicting scale set mapping for profile %s", profile.ID)
+			return nil, fmt.Errorf("conflicting scale set mapping for profile %s", profile.ID)
 		}
 		setNames[name] = true
 		if github.ScaleSetID != 0 {
 			id := setID{scope, github.ScaleSetID}
 			if setIDs[id] {
-				return fmt.Errorf("conflicting scale set ID for profile %s", profile.ID)
+				return nil, fmt.Errorf("conflicting scale set ID for profile %s", profile.ID)
 			}
 			setIDs[id] = true
 		}
 		for _, label := range github.Labels {
 			key := selector{scope, strings.ToLower(label)}
 			if selectors[key] {
-				return fmt.Errorf("conflicting GitHub selector for profile %s", profile.ID)
+				return nil, fmt.Errorf("conflicting GitHub selector for profile %s", profile.ID)
 			}
 			selectors[key] = true
 		}
-
-		provider := profile.Provisioner
-		if err := spec.AWS.checkARN(provider.BootstrapRoleARN, "runner bootstrap role"); err != nil {
-			return err
-		}
-		if controllerRoles[provider.BootstrapRoleARN] {
-			return fmt.Errorf("profile %s uses a controller role for runner bootstrap", profile.ID)
-		}
-		if provider.Type == "asg" {
-			if err := spec.AWS.checkARN(provider.GroupARN, "ASG ARN"); err != nil {
-				return err
-			}
-			if asgOwners[provider.GroupARN] {
-				return fmt.Errorf("conflicting ASG mapping for profile %s", profile.ID)
-			}
-			asgOwners[provider.GroupARN] = true
-			continue
-		}
-		if err := bindings.checkFargate(profile, controllerRoles); err != nil {
-			return err
-		}
-		boundary := trustBoundary{
-			scope, group, profile.Purpose, profile.Platform.OS, profile.Platform.Arch,
-			provider.RunnerContainer, provider.BootstrapRoleARN, provider.ExecutionRoleARN,
-		}
-		if previous, ok := taskDefinitions[provider.TaskDefinitionARN]; ok && previous != boundary {
-			return fmt.Errorf("profile %s shares a task definition across incompatible runner profiles", profile.ID)
-		}
-		taskDefinitions[provider.TaskDefinitionARN] = boundary
 	}
-	if !maps.Equal(bindings.clusters, a.Resources.ECSClusterARNs) {
-		return errors.New("resolved ECS clusters do not match selected configuration")
-	}
-	return nil
+	return scopes, nil
 }
 
 func (p Profile) validate() error {
@@ -158,13 +142,18 @@ func (p Profile) validate() error {
 }
 
 type subnetMapping struct{ vpc, zone string }
+type trustBoundary struct {
+	scope, group, purpose, os, arch, container, bootstrapRole, executionRole string
+}
 
 type deploymentBindings struct {
-	spec          Spec
-	clusters      map[string]string
-	clusterOwners map[string]bool
-	subnets       map[string]subnetMapping
-	groupVPCs     map[string]string
+	spec            Spec
+	clusters        map[string]string
+	clusterOwners   map[string]bool
+	subnets         map[string]subnetMapping
+	groupVPCs       map[string]string
+	asgOwners       map[string]bool
+	taskDefinitions map[string]trustBoundary
 }
 
 func (b *deploymentBindings) checkHost() (map[string]bool, error) {
@@ -204,6 +193,43 @@ func (b *deploymentBindings) checkHost() (map[string]bool, error) {
 		return nil, err
 	}
 	return roles, nil
+}
+
+func (b *deploymentBindings) checkExecution(profile Profile, scope string, controllerRoles map[string]bool) error {
+	provider := profile.Provisioner
+	if err := b.spec.AWS.checkARN(provider.BootstrapRoleARN, "runner bootstrap role"); err != nil {
+		return err
+	}
+	if controllerRoles[provider.BootstrapRoleARN] {
+		return fmt.Errorf("profile %s uses a controller role for runner bootstrap", profile.ID)
+	}
+	if provider.Type == "asg" {
+		return b.useASG(profile)
+	}
+	if err := b.checkFargate(profile, controllerRoles); err != nil {
+		return err
+	}
+	boundary := trustBoundary{
+		scope, strings.ToLower(profile.GitHub.RunnerGroup), profile.Purpose, profile.Platform.OS, profile.Platform.Arch,
+		provider.RunnerContainer, provider.BootstrapRoleARN, provider.ExecutionRoleARN,
+	}
+	if previous, ok := b.taskDefinitions[provider.TaskDefinitionARN]; ok && previous != boundary {
+		return fmt.Errorf("profile %s shares a task definition across incompatible runner profiles", profile.ID)
+	}
+	b.taskDefinitions[provider.TaskDefinitionARN] = boundary
+	return nil
+}
+
+func (b *deploymentBindings) useASG(profile Profile) error {
+	arn := profile.Provisioner.GroupARN
+	if err := b.spec.AWS.checkARN(arn, "ASG ARN"); err != nil {
+		return err
+	}
+	if b.asgOwners[arn] {
+		return fmt.Errorf("conflicting ASG mapping for profile %s", profile.ID)
+	}
+	b.asgOwners[arn] = true
+	return nil
 }
 
 func (b *deploymentBindings) checkFargate(profile Profile, controllerRoles map[string]bool) error {

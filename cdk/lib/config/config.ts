@@ -190,34 +190,80 @@ function sorted(value: unknown): unknown {
   return value;
 }
 
-export function loadEnvironmentConfig(path: string) {
-  return compileEnvironmentConfig(readFileSync(path, "utf8"));
-}
-
-export function compileEnvironmentConfig(source: string) {
-  const value = parseYaml(source);
-  if (!validateConfig(value)) {
-    const errors = validateConfig.errors?.map(
-      (error) => `${error.instancePath || "/"} ${error.message}`,
-    );
-    throw new Error(`Invalid configuration: ${errors?.join(", ")}`);
-  }
-
-  const spec = value.spec;
-  const aws = spec.aws;
-  const region = aws.region;
+function checkGitHubProfiles(spec: EnvironmentConfig["spec"]) {
   const scopeByConnection = new Map(
     Object.entries(spec.github).map(([name, connection]) => [
       name,
       canonicalScope(connection, name),
     ]),
   );
+  const profileIDs = new Set<string>();
+  const scaleSetOwners = new Set<string>();
+  const selectorOwners = new Set<string>();
+  for (const profile of spec.profiles) {
+    unique(profileIDs, profile.id, "profile ID");
+    const { github, capacity } = profile;
+    if (capacity.idleReserve > capacity.maxRunners) {
+      throw new Error(`Profile ${profile.id} idleReserve exceeds maxRunners`);
+    }
+    checkPlatform(profile);
+    const labels = github.labels.map((label) => label.toLowerCase());
+    if (
+      new Set(labels).size !== labels.length ||
+      !labels.includes(github.scaleSet.toLowerCase())
+    ) {
+      throw new Error(
+        `Profile ${profile.id} needs unique labels including its scale set name`,
+      );
+    }
+    if (profile.state === "disabled") {
+      continue;
+    }
+
+    const connection = configured(
+      spec.github,
+      github.connection,
+      `Profile ${profile.id}`,
+    );
+    checkAwsArn(connection.auth.secretArn, spec.aws, "GitHub secret ARN");
+    const scope = scopeByConnection.get(github.connection);
+    unique(
+      scaleSetOwners,
+      JSON.stringify([
+        scope,
+        github.runnerGroup.toLowerCase(),
+        github.scaleSet.toLowerCase(),
+      ]),
+      "GitHub scale set mapping",
+    );
+    if (github.scaleSetId !== undefined) {
+      unique(
+        scaleSetOwners,
+        JSON.stringify([scope, github.scaleSetId]),
+        "GitHub scale set ID",
+      );
+    }
+    for (const label of labels) {
+      unique(selectorOwners, `${scope}/${label}`, "GitHub selector");
+    }
+  }
+  return scopeByConnection;
+}
+
+function selectedClusters(
+  spec: EnvironmentConfig["spec"],
+  scopeByConnection: Map<string, string>,
+) {
+  const { aws } = spec;
+  const { region } = aws;
   const enabledClusters = new Map<string, string>();
   const clusterOwners = new Set<string>();
   const subnetMappings = new Map<string, string>();
   const securityGroupVpcs = new Map<string, string>();
   const useCluster = (name: string, field: string) => {
-    if (enabledClusters.has(name)) return;
+    if (enabledClusters.has(name)) {
+      return;
+    }
     const cluster = configured(spec.ecsClusters, name, field);
     const arn =
       cluster.type === "import"
@@ -287,70 +333,19 @@ export function compileEnvironmentConfig(source: string) {
       "External EC2 role",
     );
     controllerRoles.add(host.identity.principalRoleArn);
-    if (host.identity.assumeRoleArn)
+    if (host.identity.assumeRoleArn) {
       controllerRoles.add(host.identity.assumeRoleArn);
+    }
   }
 
-  const profileIDs = new Set<string>();
   const asgOwners = new Set<string>();
-  const scaleSetOwners = new Set<string>();
-  const selectorOwners = new Set<string>();
   const taskDefinitions = new Map<string, string>();
-  for (const profile of spec.profiles) {
-    unique(profileIDs, profile.id, "profile ID");
-    const { github, provisioner, capacity } = profile;
-    if (capacity.idleReserve > capacity.maxRunners) {
-      throw new Error(`Profile ${profile.id} idleReserve exceeds maxRunners`);
-    }
-    checkPlatform(profile);
-    const labels = github.labels.map((label) => label.toLowerCase());
-    if (
-      new Set(labels).size !== labels.length ||
-      !labels.includes(github.scaleSet.toLowerCase())
-    ) {
-      throw new Error(
-        `Profile ${profile.id} needs unique labels including its scale set name`,
-      );
-    }
-    if (profile.state === "disabled") continue;
-
-    const connection = configured(
-      spec.github,
-      github.connection,
-      `Profile ${profile.id}`,
-    );
-    checkAwsArn(connection.auth.secretArn, aws, "GitHub secret ARN");
+  function checkFargate(
+    profile: RunnerProfile,
+    provisioner: Extract<RunnerProfile["provisioner"], { type: "fargate" }>,
+  ) {
+    const { github } = profile;
     const scope = scopeByConnection.get(github.connection);
-    unique(
-      scaleSetOwners,
-      JSON.stringify([
-        scope,
-        github.runnerGroup.toLowerCase(),
-        github.scaleSet.toLowerCase(),
-      ]),
-      "GitHub scale set mapping",
-    );
-    if (github.scaleSetId !== undefined) {
-      unique(
-        scaleSetOwners,
-        JSON.stringify([scope, github.scaleSetId]),
-        "GitHub scale set ID",
-      );
-    }
-    for (const label of labels)
-      unique(selectorOwners, `${scope}/${label}`, "GitHub selector");
-
-    checkAwsArn(provisioner.bootstrapRoleArn, aws, "Runner bootstrap role");
-    if (controllerRoles.has(provisioner.bootstrapRoleArn)) {
-      throw new Error(
-        `Profile ${profile.id} uses a controller role for runner bootstrap`,
-      );
-    }
-    if (provisioner.type === "asg") {
-      checkAwsArn(provisioner.groupArn, aws, "ASG ARN");
-      unique(asgOwners, provisioner.groupArn, "ASG mapping");
-      continue;
-    }
     useNetwork(provisioner.network, `Profile ${profile.id}`);
     useCluster(provisioner.cluster, `Profile ${profile.id}`);
     checkAwsArn(provisioner.taskDefinitionArn, aws, "Task definition ARN");
@@ -382,6 +377,43 @@ export function compileEnvironmentConfig(source: string) {
     taskDefinitions.set(provisioner.taskDefinitionArn, boundary);
   }
 
+  for (const profile of spec.profiles) {
+    if (profile.state === "disabled") {
+      continue;
+    }
+    const { provisioner } = profile;
+    checkAwsArn(provisioner.bootstrapRoleArn, aws, "Runner bootstrap role");
+    if (controllerRoles.has(provisioner.bootstrapRoleArn)) {
+      throw new Error(
+        `Profile ${profile.id} uses a controller role for runner bootstrap`,
+      );
+    }
+    if (provisioner.type === "asg") {
+      checkAwsArn(provisioner.groupArn, aws, "ASG ARN");
+      unique(asgOwners, provisioner.groupArn, "ASG mapping");
+      continue;
+    }
+    checkFargate(profile, provisioner);
+  }
+  return enabledClusters;
+}
+
+export function loadEnvironmentConfig(path: string) {
+  return compileEnvironmentConfig(readFileSync(path, "utf8"));
+}
+
+export function compileEnvironmentConfig(source: string) {
+  const value = parseYaml(source);
+  if (!validateConfig(value)) {
+    const errors = validateConfig.errors?.map(
+      (error) => `${error.instancePath || "/"} ${error.message}`,
+    );
+    throw new Error(`Invalid configuration: ${errors?.join(", ")}`);
+  }
+
+  const spec = value.spec;
+  const scopes = checkGitHubProfiles(spec);
+  const enabledClusters = selectedClusters(spec, scopes);
   const config: EnvironmentConfig = {
     ...value,
     spec: {
