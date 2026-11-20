@@ -110,9 +110,7 @@ func (c *Connection) createAndConfirm(
 	ctx context.Context, journal *lifecycle.Store, request CreateRequest, binding runtimeconfig.GitHubBinding, parameters scaleset.RunnerScaleSet,
 ) (ScaleSet, error) {
 	createCtx, status := trackResponseStatus(ctx)
-	createCtx = scaleset.WithRequestRetry(createCtx, func(config *scaleset.RetryConfig) {
-		config.Max = 0
-	})
+	createCtx = oneWriteAttempt(createCtx)
 	created, err := c.client.CreateRunnerScaleSet(createCtx, &parameters)
 	if err != nil {
 		return ScaleSet{}, fmt.Errorf("%w: %w", ErrCreateUnconfirmed, requestError("create scale set", status.Load(), err))

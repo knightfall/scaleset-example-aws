@@ -41,6 +41,7 @@ type AcquisitionEvidence struct {
 type inboxEntry struct {
 	InboxMessage
 	Admission *admissionBatch `json:"admission,omitempty"`
+	Delivery  *deliveryFacts  `json:"delivery,omitempty"`
 }
 
 type admissionBatch struct {
@@ -137,7 +138,14 @@ func (s *Store) availableRequests(ctx context.Context, deployment, profile strin
 		if err != nil {
 			return nil, err
 		}
-		if record == nil {
+		if record != nil {
+			continue
+		}
+		job, err := s.Get(ctx, jobKey(deployment, profile, id))
+		if err != nil {
+			return nil, err
+		}
+		if job == nil {
 			ids = append(ids, id)
 		}
 	}

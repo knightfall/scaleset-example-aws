@@ -313,6 +313,8 @@ The `lifecycle` store uses the `due` GSI, with string partition key `dueShard` a
 
 The admission ledger updates `ADMISSION`, the delivery decision, and its new `ACQUIRE` rows in one lease-fenced transaction. Only the process that receives confirmation of that transaction can send the batch. A replay can persist an uncertain outcome for acknowledgement. Uncertain and accepted requests both consume budget until verified evidence accounts for or terminates an exact request. If the admission counter is missing while acquisition rows already exist, reconcile those records before enabling admission.
 
+The delivery processor writes a sanitized receipt and monotonic job observations, then commits the current-session demand and pending delivery. A missing sample preserves the prior observation and its timestamp. It records an acknowledgement intent after the acquisition outcome is durable and advances the cursor after GitHub confirms deletion. A lost acknowledgement leaves the exact delivery pending for retry. A matching completion with a usable finish time can release the request's reservation. Conflicting runner identities keep it reserved, and assignment alone cannot release a reservation before the service's event and statistics ordering is verified. Session replacement, retry supervision, and credential handover are in T09c. Verify acknowledgement behavior after remote deletion and response loss during T23.
+
 Recover across AWS/GitHub/DynamoDB boundaries as follows.
 
 | Failure or ambiguity | Recovery |
