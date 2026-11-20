@@ -81,48 +81,11 @@ func Reconcile(artifact runtimeconfig.Artifact, source io.Reader, at time.Time) 
 	if config.Spec.DryRun.InspectAWS {
 		report.Limitations = append(report.Limitations, "offline dry-run did not inspect live AWS resources")
 	}
-	profiles := make(map[string]runtimeconfig.Profile, len(config.Spec.Profiles))
-	for _, profile := range config.Spec.Profiles {
-		profiles[profile.ID] = profile
-	}
 
-	state := make(map[string]observations)
-	if source != nil {
-		snapshot, err := readSource(source, input, report.Environment)
-		if err != nil {
-			return report, err
-		}
-		if input == "replay" {
-			slices.SortStableFunc(snapshot.Records, func(a, b Record) int { return a.ObservedAt.Compare(b.ObservedAt) })
-			report.AsOf = snapshot.Records[len(snapshot.Records)-1].ObservedAt.UTC()
-		}
-		for _, record := range snapshot.Records {
-			profile, ok := profiles[record.ProfileID]
-			if !ok {
-				return report, fmt.Errorf("demand source references unknown profile %s", record.ProfileID)
-			}
-			connection := config.Spec.GitHub[profile.GitHub.Connection]
-			if profile.State == "disabled" {
-				continue
-			}
-			if err := record.verify(profile, connection); err != nil {
-				return report, fmt.Errorf("profile %s: %w", profile.ID, err)
-			}
-			record.ObservedAt = record.ObservedAt.UTC()
-			previous := state[profile.ID]
-			err := previous.apply(record, input)
-			if err != nil {
-				return report, fmt.Errorf("profile %s: %w", profile.ID, err)
-			}
-			if input == "replay" {
-				if _, err := planner.Calculate(limits(profile), previous.demand, previous.inventory, record.ObservedAt, MaxObservationAge); err != nil {
-					return report, fmt.Errorf("replay profile %s: %w", profile.ID, err)
-				}
-			}
-			state[profile.ID] = previous
-		}
-	} else if input != "none" {
-		return report, errors.New("configured demand source could not be read")
+	state, asOf, err := readObservations(config, source, report.AsOf)
+	report.AsOf = asOf
+	if err != nil {
+		return report, err
 	}
 
 	for _, profile := range config.Spec.Profiles {
@@ -148,6 +111,62 @@ func Reconcile(artifact runtimeconfig.Artifact, source io.Reader, at time.Time) 
 	return report, nil
 }
 
+func readObservations(
+	config runtimeconfig.Environment, source io.Reader, asOf time.Time,
+) (map[string]observations, time.Time, error) {
+	input := config.Spec.DryRun.Demand.Type
+	if source == nil {
+		if input != "none" {
+			return nil, asOf, errors.New("configured demand source could not be read")
+		}
+		return nil, asOf, nil
+	}
+
+	document, err := readSource(source, input, config.Metadata.Name)
+	if err != nil {
+		return nil, asOf, err
+	}
+	replay := input == "replay"
+	if replay {
+		slices.SortStableFunc(document.Records, func(a, b Record) int {
+			return a.ObservedAt.Compare(b.ObservedAt)
+		})
+		asOf = document.Records[len(document.Records)-1].ObservedAt.UTC()
+	}
+
+	profiles := make(map[string]runtimeconfig.Profile, len(config.Spec.Profiles))
+	for _, profile := range config.Spec.Profiles {
+		profiles[profile.ID] = profile
+	}
+	state := make(map[string]observations)
+	for _, record := range document.Records {
+		profile, ok := profiles[record.ProfileID]
+		if !ok {
+			return nil, asOf, fmt.Errorf("demand source references unknown profile %s", record.ProfileID)
+		}
+		if profile.State == "disabled" {
+			continue
+		}
+		connection := config.Spec.GitHub[profile.GitHub.Connection]
+		if err := record.verify(profile, connection); err != nil {
+			return nil, asOf, fmt.Errorf("profile %s: %w", profile.ID, err)
+		}
+		record.ObservedAt = record.ObservedAt.UTC()
+		evidence := state[profile.ID]
+		if err := evidence.apply(record, input); err != nil {
+			return nil, asOf, fmt.Errorf("profile %s: %w", profile.ID, err)
+		}
+		// Validate each replay step before a later record can overwrite invalid evidence.
+		if replay {
+			if _, err := planner.Calculate(limits(profile), evidence.demand, evidence.inventory, record.ObservedAt, MaxObservationAge); err != nil {
+				return nil, asOf, fmt.Errorf("replay profile %s: %w", profile.ID, err)
+			}
+		}
+		state[profile.ID] = evidence
+	}
+	return state, asOf, nil
+}
+
 func limits(profile runtimeconfig.Profile) planner.Limits {
 	return planner.Limits{
 		MaxRunners: profile.Capacity.MaxRunners, IdleReserve: profile.Capacity.IdleReserve,
@@ -165,9 +184,15 @@ func readSource(r io.Reader, source, environment string) (DemandFile, error) {
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return document, errors.New("expected one demand source document")
 	}
-	if document.APIVersion != "runners.example/v1alpha1" || document.Environment != environment ||
-		len(document.Records) == 0 || (source == "snapshot" && document.Kind != "RunnerDemandSnapshot") ||
-		(source == "replay" && document.Kind != "RunnerDemandReplay") || (source != "snapshot" && source != "replay") {
+	var expectedKind string
+	switch source {
+	case "snapshot":
+		expectedKind = "RunnerDemandSnapshot"
+	case "replay":
+		expectedKind = "RunnerDemandReplay"
+	}
+	if expectedKind == "" || document.Kind != expectedKind || document.APIVersion != "runners.example/v1alpha1" ||
+		document.Environment != environment || len(document.Records) == 0 {
 		return document, errors.New("demand source version, kind, environment or records do not match the configuration")
 	}
 	return document, nil

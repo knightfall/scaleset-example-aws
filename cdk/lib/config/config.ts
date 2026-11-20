@@ -153,21 +153,25 @@ function configured<T>(
 
 function checkPlatform(profile: RunnerProfile) {
   const { os, arch } = profile.platform;
-  if (profile.provisioner.type === "fargate") {
-    if (profile.purpose !== "fargate-compatible" || os !== "linux") {
+  const { id, purpose, provisioner } = profile;
+  if (provisioner.type === "fargate") {
+    if (purpose !== "fargate-compatible" || os !== "linux") {
       throw new Error(
-        `Profile ${profile.id} requires Linux and purpose fargate-compatible for Fargate`,
+        `Profile ${id} requires Linux and purpose fargate-compatible for Fargate`,
       );
     }
-  } else if (
-    profile.purpose === "fargate-compatible" ||
-    (profile.purpose === "copilot-cloud-agent" &&
-      (os !== "linux" || arch !== "x64")) ||
-    (os === "windows" && arch !== "x64")
+    return;
+  }
+
+  const unsupportedCopilot =
+    purpose === "copilot-cloud-agent" && (os !== "linux" || arch !== "x64");
+  const unsupportedWindows = os === "windows" && arch !== "x64";
+  if (
+    purpose === "fargate-compatible" ||
+    unsupportedCopilot ||
+    unsupportedWindows
   ) {
-    throw new Error(
-      `Profile ${profile.id} has an unsupported ASG purpose or platform`,
-    );
+    throw new Error(`Profile ${id} has an unsupported ASG purpose or platform`);
   }
 }
 
@@ -191,12 +195,10 @@ function sorted(value: unknown): unknown {
 }
 
 function checkGitHubProfiles(spec: EnvironmentConfig["spec"]) {
-  const scopeByConnection = new Map(
-    Object.entries(spec.github).map(([name, connection]) => [
-      name,
-      canonicalScope(connection, name),
-    ]),
-  );
+  const scopeByConnection = new Map<string, string>();
+  for (const [name, connection] of Object.entries(spec.github)) {
+    scopeByConnection.set(name, canonicalScope(connection, name));
+  }
   const profileIDs = new Set<string>();
   const scaleSetOwners = new Set<string>();
   const selectorOwners = new Set<string>();
@@ -286,19 +288,15 @@ function selectedClusters(
         throw new Error(`${field} has a subnet outside the configured Region`);
       }
       const mapping = network.vpcId + "/" + subnet.az;
-      if (
-        subnetMappings.has(subnet.id) &&
-        subnetMappings.get(subnet.id) !== mapping
-      ) {
+      const previous = subnetMappings.get(subnet.id);
+      if (previous !== undefined && previous !== mapping) {
         throw new Error(`Conflicting subnet mapping: ${subnet.id}`);
       }
       subnetMappings.set(subnet.id, mapping);
     }
     for (const group of network.securityGroupIds) {
-      if (
-        securityGroupVpcs.has(group) &&
-        securityGroupVpcs.get(group) !== network.vpcId
-      ) {
+      const previous = securityGroupVpcs.get(group);
+      if (previous !== undefined && previous !== network.vpcId) {
         throw new Error(`Conflicting security group mapping: ${group}`);
       }
       securityGroupVpcs.set(group, network.vpcId);
@@ -358,16 +356,16 @@ function selectedClusters(
         `Profile ${profile.id} requires a distinct task execution role`,
       );
     }
-    const boundary = JSON.stringify([
+    const boundary = JSON.stringify({
       scope,
-      github.runnerGroup.toLowerCase(),
-      profile.purpose,
-      profile.platform.os,
-      profile.platform.arch,
-      provisioner.runnerContainer,
-      provisioner.bootstrapRoleArn,
-      provisioner.executionRoleArn,
-    ]);
+      runnerGroup: github.runnerGroup.toLowerCase(),
+      purpose: profile.purpose,
+      os: profile.platform.os,
+      arch: profile.platform.arch,
+      runnerContainer: provisioner.runnerContainer,
+      bootstrapRoleArn: provisioner.bootstrapRoleArn,
+      executionRoleArn: provisioner.executionRoleArn,
+    });
     const previous = taskDefinitions.get(provisioner.taskDefinitionArn);
     if (previous !== undefined && previous !== boundary) {
       throw new Error(

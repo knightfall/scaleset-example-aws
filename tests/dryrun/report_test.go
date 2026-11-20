@@ -123,6 +123,23 @@ func TestReplayUsesChronologicalVirtualTimeAndLatestEvidence(t *testing.T) {
 	}
 }
 
+func TestReplayRejectsInvalidInventoryBeforeLaterReplacement(t *testing.T) {
+	initial := record(now.Add(-time.Minute), 1)
+	initial.Inventory = &dryrun.Inventory{Complete: true, Executors: []planner.Executor{
+		{ID: "starting-runner", State: "starting", Owned: true},
+	}}
+	latest := record(now, 1)
+	latest.Inventory = &dryrun.Inventory{Complete: true}
+	input := source(t, "RunnerDemandReplay", latest, initial)
+	report, err := dryrun.Reconcile(artifact(t, "replay"), input, now.Add(time.Hour))
+	if err == nil || !strings.Contains(err.Error(), "missing or invalid start time for starting-runner") {
+		t.Fatalf("expected invalid inventory to stop replay, got %v", err)
+	}
+	if !report.AsOf.Equal(now) || len(report.Profiles) != 0 {
+		t.Fatalf("unexpected report for failed replay: %+v", report)
+	}
+}
+
 func TestRejectsMismatchedAndConflictingInput(t *testing.T) {
 	valid := record(now, 1)
 	mismatched := valid
