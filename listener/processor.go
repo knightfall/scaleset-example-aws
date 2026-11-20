@@ -56,6 +56,14 @@ func (p Processor) Step(ctx context.Context, lease lifecycle.Lease, profile stri
 	if progress.SessionID == "" || p.Session.ID() != progress.SessionID {
 		return lifecycle.ErrSessionChanged
 	}
+	owner, err := p.Store.SessionOwnership(ctx, lease.Deployment, profile)
+	if err != nil {
+		return err
+	}
+	if owner.Phase != "" && (owner.Phase != lifecycle.SessionOpen || owner.SessionID != progress.SessionID ||
+		owner.ControllerID != lease.Owner || owner.Epoch != lease.Epoch) {
+		return lifecycle.ErrSessionChanged
+	}
 	if progress.PendingMessageID == 0 {
 		maximum := 0
 		if capacity != nil {

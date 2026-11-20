@@ -10,7 +10,11 @@ import (
 )
 
 type Session struct {
-	client *scaleset.MessageSessionClient
+	client            *scaleset.MessageSessionClient
+	ownership         lifecycle.SessionOwnership
+	deployment        string
+	profile           string
+	credentialVersion string
 }
 
 // AdaptSession wraps an already owned SDK session and exposes sanitized facts.

@@ -92,11 +92,16 @@ func (s *Store) BeginDeliverySession(ctx context.Context, lease Lease, profile, 
 	if progress.SessionID != previous {
 		return ErrSessionChanged
 	}
-	progress = SessionProgress{SessionID: session, revision: progress.revision}
+	progress = newSessionProgress(progress.revision, session, initial, now)
+	return s.writeProgress(ctx, lease, profile, now, progress)
+}
+
+func newSessionProgress(revision int64, session string, initial *DemandCounts, now time.Time) SessionProgress {
+	progress := SessionProgress{SessionID: session, revision: revision}
 	if initial != nil {
 		progress.Demand = &DemandObservation{DemandCounts: *initial, ObservedAt: now.UTC()}
 	}
-	return s.writeProgress(ctx, lease, profile, now, progress)
+	return progress
 }
 
 // PersistDelivery saves a sanitized receipt first, then monotonic job facts,
