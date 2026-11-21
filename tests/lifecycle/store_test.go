@@ -341,3 +341,18 @@ func TestProfilePaginationAndTTLDoesNotHideSettledRecords(t *testing.T) {
 		t.Fatalf("unexpected terminal page: %+v, %+v, %v", rows, end, err)
 	}
 }
+
+func TestStoreClassifiesDynamoDBTransactionContention(t *testing.T) {
+	ledger, db := store(t)
+	providerErr := &types.TransactionCanceledException{CancellationReasons: []types.CancellationReason{
+		{Code: aws.String("TransactionConflict")},
+	}}
+	db.beforeWrite = func(*dynamodb.TransactWriteItemsInput) error {
+		return providerErr
+	}
+	change := lifecycle.Change{Record: record("dev", lifecycle.ProfileKey("dev", "linux", "DEMAND"), "{}")}
+	err := ledger.Apply(t.Context(), "", change)
+	if !errors.Is(err, lifecycle.ErrConflict) || !errors.Is(err, providerErr) {
+		t.Fatalf("DynamoDB contention produced %v", err)
+	}
+}
