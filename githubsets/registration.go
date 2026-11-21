@@ -88,6 +88,10 @@ func (c *Connection) Create(ctx context.Context, journal *lifecycle.Store, reque
 		ID: request.EffectID, Kind: "create-scale-set", Target: c.scope,
 		RequestSHA256: digest, Deadline: deadline,
 	}
+	identity := fmt.Sprintf("github-set-name:%s#%d#%s", c.scope, resolved.GroupID, strings.ToLower(binding.ScaleSet))
+	if err := journal.ClaimProfileResource(ctx, request.Lease, profile.ID, identity, time.Now()); err != nil {
+		return ScaleSet{}, err
+	}
 	if _, err := journal.PlanEffect(ctx, request.Lease, profile.ID, effect, time.Now()); err != nil {
 		return ScaleSet{}, err
 	}
