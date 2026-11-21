@@ -91,26 +91,71 @@ func (j jobObservation) merge(fact JobFact) jobObservation {
 	return j
 }
 
-// A completion releases the request's reservation. It does not authorize
-// retiring an executor, whose identity or occupancy may remain unresolved.
+// releaseCompletedRequest uses the owned session's terminal event even when
+// its time is absent or ahead of the local clock. Executor cleanup needs its own proof.
 func (s *Store) releaseCompletedRequest(ctx context.Context, lease Lease, profile string, now time.Time, message InboxMessage, fact JobFact) error {
-	if fact.Phase != JobCompleted || fact.OccurredAt.IsZero() || fact.OccurredAt.After(now) {
-		return nil
-	}
-	key := acquisitionKey(lease.Deployment, profile, fact.RequestID)
-	record, err := s.Get(ctx, key)
-	if err != nil || record == nil {
+	reservation, _, err := s.jobReservation(ctx, lease.Deployment, profile, fact.RequestID)
+	if err != nil || !reservation.counted() {
 		return err
-	}
-	var reservation admissionReservation
-	if err := json.Unmarshal(record.Payload, &reservation); err != nil || reservation.RequestID != fact.RequestID || reservation.InboxKey == "" {
-		return errors.New("invalid durable acquisition for completed request")
-	}
-	if reservation.State == "accounted" || reservation.State == "terminal" || reservation.State == "unstarted" {
-		return nil
 	}
 	return s.ReleaseAdmission(ctx, lease, profile, now, AcquisitionEvidence{
 		RequestID: fact.RequestID, State: "terminal",
 		Reference: fmt.Sprintf("completed:%s:%d:%d", message.SessionID, message.MessageID, fact.RequestID),
 	})
+}
+
+func (s *Store) jobReservation(ctx context.Context, deployment, profile string, requestID int64) (admissionReservation, int64, error) {
+	record, err := s.Get(ctx, acquisitionKey(deployment, profile, requestID))
+	if err != nil || record == nil {
+		return admissionReservation{}, 0, err
+	}
+	reservation, err := decodeAcquisition(record, requestID)
+	return reservation, record.Revision, err
+}
+
+func (r admissionReservation) counted() bool {
+	switch r.State {
+	case "pending", "uncertain", "accepted":
+		return true
+	default:
+		return false
+	}
+}
+
+// The accounting changes must commit with the same delivery's demand
+// observation. Until then the previous snapshot may still be in use.
+func (s *Store) accountedReservations(ctx context.Context, deployment, profile string, message InboxMessage, jobs map[int64]jobObservation) ([]Change, error) {
+	// Leave room for the lease fence, inbox, demand snapshot and budget.
+	const maxAccounted = 96
+	changes := make([]Change, 0, min(len(jobs), maxAccounted))
+	for id, job := range jobs {
+		if len(changes) == maxAccounted {
+			break
+		}
+		if job.ConflictingRunner || (job.Phase != JobAssigned && job.Phase != JobStarted) {
+			continue
+		}
+		reservation, revision, err := s.jobReservation(ctx, deployment, profile, id)
+		if err != nil {
+			return nil, err
+		}
+		if !reservation.counted() {
+			continue
+		}
+		reservation.State = "accounted"
+		reservation.DecisionRef = fmt.Sprintf("%s:%s:%d:%d", job.Phase, message.SessionID, message.MessageID, id)
+		change, err := admissionChange(deployment, acquisitionKey(deployment, profile, id), revision, reservation)
+		if err != nil {
+			return nil, err
+		}
+		changes = append(changes, change)
+	}
+	if len(changes) == 0 {
+		return nil, nil
+	}
+	budget, err := s.releaseAdmissionBudget(ctx, deployment, profile, len(changes))
+	if err != nil {
+		return nil, err
+	}
+	return append(changes, budget), nil
 }

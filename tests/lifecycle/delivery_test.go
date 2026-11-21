@@ -47,7 +47,7 @@ func TestDeliveryProcessorResumesAcknowledgementWithoutReacquiring(t *testing.T)
 	lostAcquire := errors.New("lost acquisition response")
 	deliveries := []lifecycle.Delivery{
 		{MessageID: 1, Offers: []int64{100, 101}, Jobs: []lifecycle.JobFact{{RequestID: 90, Phase: lifecycle.JobAssigned}}},
-		{MessageID: 2, Stats: initial, Offers: []int64{102}, Jobs: []lifecycle.JobFact{{RequestID: 100, Phase: lifecycle.JobAssigned}}},
+		{MessageID: 2, Offers: []int64{102}, Jobs: []lifecycle.JobFact{{RequestID: 100, Phase: lifecycle.JobAssigned}}},
 		{MessageID: 3, Stats: initial, Offers: []int64{102}, Jobs: []lifecycle.JobFact{
 			{RequestID: 100, Phase: lifecycle.JobCompleted, RunnerID: 7, OccurredAt: now},
 		}},

@@ -163,11 +163,11 @@ func (s *Store) PersistDelivery(ctx context.Context, lease Lease, profile, sessi
 		}
 		jobs[fact.RequestID] = job
 	}
-	for _, fact := range delivery.Jobs {
-		if jobs[fact.RequestID].ConflictingRunner {
+	for _, job := range jobs {
+		if job.ConflictingRunner || job.Phase != JobCompleted {
 			continue
 		}
-		if err := s.releaseCompletedRequest(ctx, lease, profile, now, entry.InboxMessage, fact); err != nil {
+		if err := s.releaseCompletedRequest(ctx, lease, profile, now, entry.InboxMessage, job.JobFact); err != nil {
 			return err
 		}
 	}
@@ -178,17 +178,24 @@ func (s *Store) PersistDelivery(ctx context.Context, lease Lease, profile, sessi
 	}
 	progress.PendingMessageID = delivery.MessageID
 	progress.PendingZeroMessage = delivery.MessageID == 0
-	if delivery.Stats != nil {
-		// An inconsistent snapshot cannot support admission. Keep the job
-		// facts and invalidate the previous demand until a usable sample arrives.
+	stats := delivery.Stats
+	if stats != nil {
+		// An inconsistent snapshot closes admission without dropping the job facts.
 		progress.Demand = nil
-		if delivery.Stats.valid() {
+		if stats.valid() {
 			progress.Demand = &DemandObservation{
-				DemandCounts: *delivery.Stats, ObservedAt: entry.ReceivedAt, MessageID: delivery.MessageID,
+				DemandCounts: *stats, ObservedAt: entry.ReceivedAt, MessageID: delivery.MessageID,
 			}
 		}
 	}
-	return s.writeProgress(ctx, lease, profile, now, progress, processed)
+	if stats == nil || progress.Demand == nil || stats.Assigned == 0 {
+		return s.writeProgress(ctx, lease, profile, now, progress, processed)
+	}
+	accounted, err := s.accountedReservations(ctx, lease.Deployment, profile, entry.InboxMessage, jobs)
+	if err != nil {
+		return err
+	}
+	return s.writeProgress(ctx, lease, profile, now, progress, append(accounted, processed)...)
 }
 
 func (d Delivery) validate() error {
