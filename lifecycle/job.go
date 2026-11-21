@@ -60,14 +60,21 @@ func (s *Store) recordJobFact(ctx context.Context, lease Lease, profile string, 
 		}
 	}
 	next := current.merge(fact)
-	if next == current {
-		return current, nil
-	}
-	change, err := admissionChange(lease.Deployment, key, revision, next)
+	changes, err := s.executorJobChanges(ctx, lease.Deployment, profile, fact, current, next.ConflictingRunner)
 	if err != nil {
 		return jobObservation{}, err
 	}
-	if err := s.ApplyFenced(ctx, lease, now, "", change); err != nil {
+	if next != current {
+		change, err := admissionChange(lease.Deployment, key, revision, next)
+		if err != nil {
+			return jobObservation{}, err
+		}
+		changes = append(changes, change)
+	}
+	if len(changes) == 0 {
+		return next, nil
+	}
+	if err := s.ApplyFenced(ctx, lease, now, "", changes...); err != nil {
 		return jobObservation{}, err
 	}
 	return next, nil
