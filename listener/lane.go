@@ -159,6 +159,12 @@ func (l *profileLane) step(ctx context.Context) error {
 		(l.session == nil || owner.Phase != lifecycle.SessionOpen || owner.SessionID != l.session.ID()) {
 		return lifecycle.ErrSessionRecoveryRequired
 	}
+	request, cancel = boundedContext(ctx, lease.ValidUntil, s.Timing.OperationTimeout)
+	err = s.Store.InitializeEffectTracking(request, lease, l.profile.ID, time.Now())
+	cancel()
+	if err != nil {
+		return err
+	}
 	connection, refreshErr := l.credentials.refresh(ctx, l, lease)
 	if refreshErr != nil && l.session != nil && connection != nil {
 		s.Logger.Warn("candidate GitHub credential unavailable", "profile", l.profile.ID, "error", refreshErr)
