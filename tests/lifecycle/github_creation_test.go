@@ -88,6 +88,10 @@ func TestScaleSetCreationPersistsIntentBeforeOneWriteAndConfirmsReadback(t *test
 				case "/_apis/runtime/runnerscalesets":
 					if req.Method == http.MethodPost {
 						posts++
+						claim, err := ledger.Get(t.Context(), lifecycle.ClaimKey("github-set-name:https://github.com/enterprises/fixture#19#linux"))
+						if err != nil || claim == nil || claim.Deployment != lease.Deployment || string(claim.Payload) != `"build"` {
+							t.Fatalf("profile name claim before POST = %+v, error = %v", claim, err)
+						}
 						effect, err := ledger.Effect(t.Context(), "dev", profile, effectID)
 						if err != nil || effect == nil || effect.State != lifecycle.EffectExecuting ||
 							effect.Kind != "create-scale-set" || len(effect.RequestSHA256) != 64 {
