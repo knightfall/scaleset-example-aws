@@ -155,14 +155,14 @@ func (s *Store) ApplyRollout(ctx context.Context, lease Lease, rollout Rollout, 
 		next.Profiles = make(map[string]CatalogProfile)
 	}
 	if rollout.Generation > current.Generation {
-		if err := s.applyProfileChanges(ctx, lease.Deployment, &next, desired, now); err != nil {
+		if err := s.applyProfileChanges(ctx, lease, &next, desired, now); err != nil {
 			return ProfileCatalog{}, err
 		}
 	}
 	return s.saveCatalog(ctx, lease, next, now)
 }
 
-func (s *Store) applyProfileChanges(ctx context.Context, deployment string, next *ProfileCatalog, desired map[string]DesiredProfile, now time.Time) error {
+func (s *Store) applyProfileChanges(ctx context.Context, lease Lease, next *ProfileCatalog, desired map[string]DesiredProfile, now time.Time) error {
 	for id, existing := range next.Profiles {
 		if existing.State == ProfileRetired {
 			continue
@@ -171,7 +171,7 @@ func (s *Store) applyProfileChanges(ctx context.Context, deployment string, next
 		if present && profile.State != ProfileDisabled {
 			continue
 		}
-		if err := s.checkRetirement(ctx, deployment, id, existing, now); err != nil {
+		if err := s.checkRetirement(ctx, lease, id, existing, now); err != nil {
 			return fmt.Errorf("profile %s: %w", id, err)
 		}
 		existing.State, existing.RetiredAt = ProfileRetired, now.UTC()
@@ -193,11 +193,12 @@ func (s *Store) applyProfileChanges(ctx context.Context, deployment string, next
 	return nil
 }
 
-func (s *Store) checkRetirement(ctx context.Context, deployment, profile string, existing CatalogProfile, now time.Time) error {
+func (s *Store) checkRetirement(ctx context.Context, lease Lease, profile string, existing CatalogProfile, now time.Time) error {
 	proof := existing.Retirement
 	if existing.State != ProfileDraining || proof == nil || !proof.Ready || !proof.Last.ValidUntil.After(now) {
 		return ErrProfileRetirement
 	}
+	deployment := lease.Deployment
 	owner, err := s.SessionOwnership(ctx, deployment, profile)
 	if err != nil {
 		return err
@@ -223,6 +224,10 @@ func (s *Store) checkRetirement(ctx context.Context, deployment, profile string,
 		if err := s.checkEmptyAdmission(ctx, ProfileKey(deployment, profile, "").PK); err != nil {
 			return err
 		}
+	}
+	// Removed and disabled profiles have no listener to complete the rebuild.
+	if err := s.InitializeEffectTracking(ctx, lease, profile, now); err != nil {
+		return err
 	}
 	settled, err := s.ProfileEffectsSettled(ctx, deployment, profile)
 	if err != nil {

@@ -215,6 +215,9 @@ func useProfilePrefixQueries(db *database) {
 		}
 		partition := stringValue(input.ExpressionAttributeValues[":pk"])
 		prefix := stringValue(input.ExpressionAttributeValues[":prefix"])
+		if prefix == "OP#" {
+			return db.queryEffectHistory(input)
+		}
 		db.mu.Lock()
 		defer db.mu.Unlock()
 		page := &dynamodb.QueryOutput{}
@@ -267,6 +270,62 @@ func waitForSupervisorEvents(t *testing.T, events <-chan string, requested ...st
 		case <-timer.C:
 			t.Fatalf("missing supervisor events: %v", pending)
 		}
+	}
+}
+
+func TestSupervisorRebuildsRetiringProfileBeforeStartingListeners(t *testing.T) {
+	ledger, lease, _, remote, supervisor, db := supervisedFixture(t, false)
+	ctx := t.Context()
+	now := time.Now()
+	prior := lifecycle.Rollout{
+		Generation: 1, Digest: strings.Repeat("ab", 32),
+		Profiles: []lifecycle.DesiredProfile{{ID: "build", State: lifecycle.ProfileDraining, BindingDigest: strings.Repeat("cd", 32)}},
+	}
+	if _, err := ledger.ApplyRollout(ctx, lease, prior, now); err != nil {
+		t.Fatal(err)
+	}
+	for _, pass := range []lifecycle.RetirementObservation{clearPass("first", now.Add(-time.Second)), clearPass("second", now)} {
+		if _, err := ledger.RecordRetirementObservation(ctx, lease, 1, "build", pass, time.Second, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := 0; index < 70; index++ {
+		id := fmt.Sprintf("settled-%03d", index)
+		payload := fmt.Sprintf(`{"id":%q,"state":"confirmed","evidence":"provider:confirmed"}`, id)
+		if err := ledger.ApplyFenced(ctx, lease, now, "", lifecycle.Change{
+			Record: record("dev", lifecycle.ProfileKey("dev", "build", "OP#"+id), payload),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lease = catalogLease(t, ledger, lease, time.Now())
+	artifact := githubCreationConfig()
+	artifact.Config.Spec.Profiles[0].ID = "other"
+	artifact.Config.Spec.Profiles[0].GitHub.ScaleSet = "other"
+	artifact.Config.Spec.Profiles[0].GitHub.Labels = []string{"other"}
+	supervisor.ConfigurationGeneration = 2
+
+	run, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- supervisor.Run(run, artifact, lease) }()
+	waitForSupervisorEvents(t, remote.events, "poll:8")
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("supervisor did not shut down")
+	}
+	catalog, err := ledger.Catalog(ctx, "dev")
+	if err != nil || catalog.Generation != 2 || catalog.Profiles["build"].State != lifecycle.ProfileRetired {
+		t.Fatalf("rollout did not retire the removed profile: %+v, %v", catalog, err)
+	}
+	assertEffectCount(t, ledger, lease, "build", 0)
+	if db.effectPages != 4 {
+		t.Fatalf("want three retirement pages and one for the new listener, got %d", db.effectPages)
 	}
 }
 

@@ -76,10 +76,6 @@ func (s Supervisor) Run(ctx context.Context, artifact runtimeconfig.Artifact, le
 	if err != nil {
 		return err
 	}
-	if _, err := s.Store.ApplyRollout(ctx, *current, rollout, time.Now()); err != nil {
-		return fmt.Errorf("activate configuration: %w", err)
-	}
-
 	polling, cancelPolling := context.WithCancel(ctx)
 	defer cancelPolling()
 	heartbeat, stopHeartbeat := context.WithCancel(context.WithoutCancel(ctx))
@@ -98,6 +94,10 @@ func (s Supervisor) Run(ctx context.Context, artifact runtimeconfig.Artifact, le
 		}
 		heartbeatResult <- err
 	}()
+	if err := s.activateConfiguration(polling, &held, rollout); err != nil {
+		stopHeartbeat()
+		return errors.Join(fmt.Errorf("activate configuration: %w", err), <-heartbeatResult)
+	}
 
 	laneResults := make(chan error, len(lanes))
 	for _, lane := range lanes {
@@ -117,6 +117,21 @@ func (s Supervisor) Run(ctx context.Context, artifact runtimeconfig.Artifact, le
 	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), timing.ShutdownTimeout)
 	defer cancel()
 	return s.releaseWhenSettled(cleanup, artifact.Config.Spec.Profiles, lease)
+}
+
+func (s Supervisor) activateConfiguration(ctx context.Context, held *atomic.Pointer[lifecycle.Lease], rollout lifecycle.Rollout) error {
+	for {
+		lease := *held.Load()
+		request, cancel := boundedContext(ctx, lease.ValidUntil, s.Timing.OperationTimeout)
+		_, err := s.Store.ApplyRollout(request, lease, rollout, time.Now())
+		cancel()
+		if !errors.Is(err, lifecycle.ErrEffectTrackingPending) {
+			return err
+		}
+		if !waitUntil(ctx, time.Now().Add(100*time.Millisecond)) {
+			return ctx.Err()
+		}
+	}
 }
 
 func (s Supervisor) renewLease(ctx context.Context, held *atomic.Pointer[lifecycle.Lease]) error {
