@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -100,5 +101,33 @@ func TestRequestErrorPreservesTheUsedCredentialRateLimitKey(t *testing.T) {
 	limit, ok := errors.AsType[*RateLimitError](err)
 	if !ok || limit.CredentialKey != key || limit.RetryAfter != time.Second {
 		t.Fatalf("rate limit translation = %v", err)
+	}
+}
+
+func TestNotFoundErrorsAreDistinctAndSanitized(t *testing.T) {
+	for _, original := range []error{scaleset.NotFoundError, &scaleset.RequestResponseError{
+		Response: &http.Response{StatusCode: http.StatusNotFound},
+	}} {
+		err := requestError("lookup", original, [32]byte{})
+		if !errors.Is(err, ErrNotFound) || err.Error() != "lookup: "+ErrNotFound.Error() {
+			t.Fatalf("absence translation: %v", err)
+		}
+	}
+}
+
+func TestRejectedTransportRequestClearsCredentialRetryAttribution(t *testing.T) {
+	ctx := oneWriteAttempt(t.Context())
+	attribution := ctx.Value(credentialRetryKey{}).(*atomic.Bool)
+	attribution.Store(true)
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://example.invalid/mutation", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := githubTransport{next: transportFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("invalid request reached the wire")
+		return nil, nil
+	})}
+	if _, err := transport.RoundTrip(request); err == nil || attribution.Load() {
+		t.Fatalf("invalid mutation retained credential attribution: %v", err)
 	}
 }

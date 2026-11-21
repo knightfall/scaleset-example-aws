@@ -102,6 +102,11 @@ func (l *profileLane) run(ctx context.Context) error {
 			break
 		}
 		if err != nil {
+			if errors.Is(err, githubsets.ErrUnauthorized) {
+				l.credentials.mu.Lock()
+				l.credentials.checkAt = time.Time{}
+				l.credentials.mu.Unlock()
+			}
 			l.credentials.recordLimit(err)
 			l.supervisor.Logger.Warn("profile listener retry", "profile", l.profile.ID, "error", err)
 			retryAt = time.Now().Add(retryDelay(failures))
@@ -117,6 +122,15 @@ func (l *profileLane) run(ctx context.Context) error {
 	lease := *l.held.Load()
 	closeCtx, cancel := boundedContext(context.WithoutCancel(ctx), lease.ValidUntil, l.supervisor.Timing.ShutdownTimeout)
 	defer cancel()
+	owner, err := l.supervisor.Store.SessionOwnership(closeCtx, lease.Deployment, l.profile.ID)
+	if err != nil {
+		return fmt.Errorf("inspect profile %s session for shutdown: %w", l.profile.ID, err)
+	}
+	if owner.Phase == lifecycle.SessionClosing && owner.SessionID == l.session.ID() {
+		if !waitUntil(closeCtx, owner.Deadline) {
+			return fmt.Errorf("wait for profile %s session close: %w", l.profile.ID, closeCtx.Err())
+		}
+	}
 	if err := l.session.CloseOwned(closeCtx, l.supervisor.Store, lease); err != nil {
 		return fmt.Errorf("close profile %s session: %w", l.profile.ID, err)
 	}

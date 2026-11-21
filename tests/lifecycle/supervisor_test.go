@@ -49,6 +49,8 @@ type supervisorRemote struct {
 	buildCreates       int
 	offered            bool
 	invalidateCapacity func()
+	rejectNextPoll     bool
+	interruptClose     func()
 }
 
 const supervisorSetsPath = "/_apis/runtime/runnerscalesets"
@@ -104,6 +106,8 @@ func (r *supervisorRemote) RoundTrip(request *http.Request) (*http.Response, err
 	path := strings.TrimPrefix(request.URL.Path, supervisorSetsPath+"/")
 	set, action, _ := strings.Cut(path, "/")
 	switch {
+	case request.Method == http.MethodPatch && strings.HasPrefix(action, "sessions/"):
+		return fixtureReply(http.StatusForbidden, "{}"), nil
 	case request.Method == http.MethodPost && action == "sessions":
 		return r.open(request, set)
 	case request.Method == http.MethodDelete && strings.HasPrefix(action, "sessions/"):
@@ -137,6 +141,12 @@ func (r *supervisorRemote) open(request *http.Request, set string) (*http.Respon
 
 func (r *supervisorRemote) poll(request *http.Request, set string) (*http.Response, error) {
 	r.mu.Lock()
+	if r.rejectNextPoll {
+		r.rejectNextPoll = false
+		r.mu.Unlock()
+		r.record("rejected-poll")
+		return fixtureReply(http.StatusUnauthorized, "{}"), nil
+	}
 	if r.active[set] == "" {
 		r.t.Errorf("poll of closed session for set %s", set)
 	}
@@ -174,6 +184,11 @@ func (r *supervisorRemote) poll(request *http.Request, set string) (*http.Respon
 func (r *supervisorRemote) close(set, id string) (*http.Response, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.interruptClose != nil {
+		r.interruptClose()
+		r.interruptClose = nil
+		return nil, context.Canceled
+	}
 	if r.active[set] != id || r.polling[set] != 0 {
 		r.t.Errorf("close of wrong session or before poll joined for set %s", set)
 		return nil, errors.New("fixture detected unsafe shutdown")
@@ -256,7 +271,17 @@ func waitForSupervisorEvents(t *testing.T, events <-chan string, requested ...st
 }
 
 func TestSupervisorRotatesIndependentProfilesAndReleasesAfterShutdown(t *testing.T) {
-	ledger, lease, secrets, remote, supervisor, _ := supervisedFixture(t, false)
+	ledger, lease, secrets, remote, supervisor, db := supervisedFixture(t, false)
+	var renewalFailed bool
+	db.beforeWrite = func(input *dynamodb.TransactWriteItemsInput) error {
+		for _, item := range input.TransactItems {
+			if item.Put != nil && keyOf(item.Put.Item).SK == "LEASE" && !renewalFailed {
+				renewalFailed = true
+				return errors.New("temporary renewal failure")
+			}
+		}
+		return nil
+	}
 	artifact := githubCreationConfig()
 	profile := artifact.Config.Spec.Profiles[0]
 	profile.ID = "other"
@@ -323,6 +348,59 @@ func TestSupervisorRotatesIndependentProfilesAndReleasesAfterShutdown(t *testing
 	}
 	if len(remote.active) != 0 {
 		t.Fatalf("shutdown left sessions active: %v", remote.active)
+	}
+}
+
+func TestSupervisorRefreshesRejectedCredentialBeforeItsInterval(t *testing.T) {
+	_, lease, secrets, remote, supervisor, _ := supervisedFixture(t, false)
+	supervisor.Timing.CredentialInterval = time.Hour
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- supervisor.Run(ctx, githubCreationConfig(), lease) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("supervisor shutdown: %v", err)
+			}
+		case <-time.After(4 * time.Second):
+			t.Error("supervisor did not stop")
+		}
+	})
+	waitForSupervisorEvents(t, remote.events, "poll:7")
+	secrets.version.Store(3)
+	remote.mu.Lock()
+	remote.rejectNextPoll = true
+	remote.mu.Unlock()
+	waitForSupervisorEvents(t, remote.events, "rejected-poll", "opened:7:2")
+}
+
+func TestSupervisorWaitsForInterruptedCloseDuringShutdown(t *testing.T) {
+	_, lease, secrets, remote, supervisor, _ := supervisedFixture(t, false)
+	supervisor.Timing.ShutdownTimeout = 1500 * time.Millisecond
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- supervisor.Run(ctx, githubCreationConfig(), lease) }()
+	waitForSupervisorEvents(t, remote.events, "poll:7")
+	remote.mu.Lock()
+	remote.interruptClose = cancel
+	remote.mu.Unlock()
+	secrets.version.Store(3)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("interrupted rotation prevented clean shutdown: %v", err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("shutdown did not finish")
+	}
+	remote.mu.Lock()
+	defer remote.mu.Unlock()
+	if len(remote.active) != 0 {
+		t.Fatalf("shutdown left remote sessions: %v", remote.active)
 	}
 }
 
