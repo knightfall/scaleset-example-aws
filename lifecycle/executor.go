@@ -27,15 +27,16 @@ type RunnerIdentity struct {
 // Executor stores verified identities and job observations. A completed job
 // alone provides no evidence that the executor can be stopped.
 type Executor struct {
-	Binding        ExecutorBinding     `json:"binding"`
-	Runner         RunnerIdentity      `json:"runner,omitzero"`
-	Attempt        JobFact             `json:"attempt,omitzero"`
-	Resource       ResourceObservation `json:"resource,omitzero"`
-	Process        ProcessObservation  `json:"process,omitzero"`
-	ResourceLiveAt time.Time           `json:"resourceLiveAt,omitzero"`
-	ProcessLiveAt  time.Time           `json:"processLiveAt,omitzero"`
-	Conflicted     bool                `json:"conflicted,omitempty"`
-	revision       int64
+	Binding           ExecutorBinding     `json:"binding"`
+	Runner            RunnerIdentity      `json:"runner,omitzero"`
+	Attempt           JobFact             `json:"attempt,omitzero"`
+	Resource          ResourceObservation `json:"resource,omitzero"`
+	Process           ProcessObservation  `json:"process,omitzero"`
+	ResourceLiveAt    time.Time           `json:"resourceLiveAt,omitzero"`
+	ProcessLiveAt     time.Time           `json:"processLiveAt,omitzero"`
+	Conflicted        bool                `json:"conflicted,omitempty"`
+	ConflictReference string              `json:"conflictReference,omitempty"`
+	revision          int64
 }
 
 func (b ExecutorBinding) valid() bool {
@@ -60,16 +61,25 @@ func (s *Store) Executor(ctx context.Context, deployment, profile, allocation st
 	if err != nil || record == nil {
 		return nil, err
 	}
+	executor, err := decodeExecutor(*record, allocation)
+	if err != nil {
+		return nil, err
+	}
+	return &executor, nil
+}
+
+func decodeExecutor(record Record, allocation string) (Executor, error) {
 	var executor Executor
 	if err := json.Unmarshal(record.Payload, &executor); err != nil || !executor.valid(allocation) {
-		return nil, errors.New("invalid durable executor")
+		return Executor{}, errors.New("invalid durable executor")
 	}
 	executor.revision = record.Revision
-	return &executor, nil
+	return executor, nil
 }
 
 func (e Executor) valid(allocation string) bool {
 	if e.Binding.AllocationID != allocation || !e.Binding.valid() ||
+		(e.ConflictReference != "" && !e.Conflicted) ||
 		(e.Runner != (RunnerIdentity{}) && !e.Runner.valid()) ||
 		(e.Resource != (ResourceObservation{}) && !e.Resource.valid()) ||
 		(e.Process != (ProcessObservation{}) && (!e.Process.valid() || e.Process.Runner != e.Runner)) {

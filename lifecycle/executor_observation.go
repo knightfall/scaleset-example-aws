@@ -175,3 +175,19 @@ func (s *Store) saveExecutor(ctx context.Context, lease Lease, profile string, e
 	// mutations remain blocked until takeover is authorized.
 	return s.applyOwned(ctx, lease, now, "", change)
 }
+
+// MarkExecutorConflict retains a verified identity or provenance mismatch.
+// A subsequent healthy inventory cannot clear this protection automatically.
+func (s *Store) MarkExecutorConflict(ctx context.Context, lease Lease, profile string, binding ExecutorBinding, reference string, now time.Time) error {
+	if reference == "" || now.IsZero() {
+		return errors.New("executor conflict requires a sanitized evidence reference and observation time")
+	}
+	executor, err := s.boundExecutor(ctx, lease.Deployment, profile, binding)
+	if err != nil {
+		return err
+	}
+	previous := *executor
+	executor.Conflicted = true
+	executor.ConflictReference = reference
+	return s.saveExecutor(ctx, lease, profile, *executor, previous, now)
+}
