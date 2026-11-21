@@ -163,11 +163,11 @@ func (s *Store) PersistDelivery(ctx context.Context, lease Lease, profile, sessi
 		}
 		jobs[fact.RequestID] = job
 	}
-	for _, fact := range delivery.Jobs {
-		if jobs[fact.RequestID].ConflictingRunner {
+	for _, job := range jobs {
+		if job.ConflictingRunner {
 			continue
 		}
-		if err := s.releaseCompletedRequest(ctx, lease, profile, now, entry.InboxMessage, fact); err != nil {
+		if err := s.reconcileJobReservation(ctx, lease, profile, now, entry.InboxMessage, job.JobFact, delivery.Stats); err != nil {
 			return err
 		}
 	}

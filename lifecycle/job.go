@@ -91,10 +91,25 @@ func (j jobObservation) merge(fact JobFact) jobObservation {
 	return j
 }
 
-// A completion releases the request's reservation. It does not authorize
-// retiring an executor, whose identity or occupancy may remain unresolved.
-func (s *Store) releaseCompletedRequest(ctx context.Context, lease Lease, profile string, now time.Time, message InboxMessage, fact JobFact) error {
-	if fact.Phase != JobCompleted || fact.OccurredAt.IsZero() || fact.OccurredAt.After(now) {
+// Admission counts unreflected requests separately from the current assigned
+// total. Update only a request identified by the owned session's job facts.
+func (s *Store) reconcileJobReservation(
+	ctx context.Context, lease Lease, profile string, now time.Time, message InboxMessage, fact JobFact, stats *DemandCounts,
+) error {
+	var disposition string
+	switch fact.Phase {
+	case JobCompleted:
+		// A terminal queue event releases admission even when its wall clock
+		// differs from ours. Executor cleanup requires its own occupancy proof.
+		disposition = "terminal"
+	case JobAssigned, JobStarted:
+		if stats == nil || !stats.valid() || stats.Assigned == 0 {
+			return nil
+		}
+		// The same delivery supplies the identified assignment and a current
+		// assigned total. An aggregate change alone identifies no reservation.
+		disposition = "accounted"
+	default:
 		return nil
 	}
 	key := acquisitionKey(lease.Deployment, profile, fact.RequestID)
@@ -110,7 +125,7 @@ func (s *Store) releaseCompletedRequest(ctx context.Context, lease Lease, profil
 		return nil
 	}
 	return s.ReleaseAdmission(ctx, lease, profile, now, AcquisitionEvidence{
-		RequestID: fact.RequestID, State: "terminal",
-		Reference: fmt.Sprintf("completed:%s:%d:%d", message.SessionID, message.MessageID, fact.RequestID),
+		RequestID: fact.RequestID, State: disposition,
+		Reference: fmt.Sprintf("%s:%s:%d:%d", fact.Phase, message.SessionID, message.MessageID, fact.RequestID),
 	})
 }
