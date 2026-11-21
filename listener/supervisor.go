@@ -32,9 +32,10 @@ func DefaultTiming() Timing {
 }
 
 type Supervisor struct {
-	Store  *lifecycle.Store
-	Loader githubsets.Loader
-	Timing Timing
+	Store                   *lifecycle.Store
+	Loader                  githubsets.Loader
+	Timing                  Timing
+	ConfigurationGeneration int64
 	// Capacity returns verified backend headroom. Nil keeps admission closed.
 	Capacity func(context.Context, runtimeconfig.Profile) (*Capacity, error)
 	Logger   *slog.Logger
@@ -44,8 +45,8 @@ type Supervisor struct {
 // joins the polling lanes before releasing ownership.
 func (s Supervisor) Run(ctx context.Context, artifact runtimeconfig.Artifact, lease lifecycle.Lease) error {
 	if artifact.Config.Spec.Mode != "active" || lease.Deployment != artifact.Config.Metadata.Name ||
-		s.Store == nil || s.Loader.Secrets == nil {
-		return errors.New("supervision requires active configuration, matching lease and active clients")
+		s.Store == nil || s.Loader.Secrets == nil || s.ConfigurationGeneration <= 0 {
+		return errors.New("supervision requires active configuration, a generation, matching lease and active clients")
 	}
 	if s.Timing == (Timing{}) {
 		s.Timing = DefaultTiming()
@@ -68,6 +69,14 @@ func (s Supervisor) Run(ctx context.Context, artifact runtimeconfig.Artifact, le
 	if current == nil || current.Owner != lease.Owner || current.Epoch != lease.Epoch ||
 		current.Phase != lifecycle.LeaseActive || !current.ValidUntil.After(time.Now()) {
 		return lifecycle.ErrLeaseLost
+	}
+
+	rollout, err := configurationRollout(artifact, s.ConfigurationGeneration)
+	if err != nil {
+		return err
+	}
+	if _, err := s.Store.ApplyRollout(ctx, *current, rollout, time.Now()); err != nil {
+		return fmt.Errorf("activate configuration: %w", err)
 	}
 
 	polling, cancelPolling := context.WithCancel(ctx)

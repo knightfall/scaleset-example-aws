@@ -193,9 +193,7 @@ func (r *supervisorRemote) record(event string) {
 	}
 }
 
-func supervisedFixture(t *testing.T, loseClose bool) (*lifecycle.Store, lifecycle.Lease, *supervisorSecrets, *supervisorRemote, listener.Supervisor, *database) {
-	t.Helper()
-	ledger, db := store(t)
+func useProfilePrefixQueries(db *database) {
 	db.query = func(input *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
 		if !aws.ToBool(input.ConsistentRead) || aws.ToString(input.IndexName) != "" {
 			return nil, errors.New("shutdown must inspect effects in the base table")
@@ -212,6 +210,12 @@ func supervisedFixture(t *testing.T, loseClose bool) (*lifecycle.Store, lifecycl
 		}
 		return page, nil
 	}
+}
+
+func supervisedFixture(t *testing.T, loseClose bool) (*lifecycle.Store, lifecycle.Lease, *supervisorSecrets, *supervisorRemote, listener.Supervisor, *database) {
+	t.Helper()
+	ledger, db := store(t)
+	useProfilePrefixQueries(db)
 	timing := listener.Timing{
 		LeaseTTL: 2 * time.Second, OperationTimeout: time.Second, PollTimeout: time.Second,
 		CredentialInterval: 75 * time.Millisecond, MaxDemandAge: time.Minute, ShutdownTimeout: time.Second,
@@ -227,7 +231,7 @@ func supervisedFixture(t *testing.T, loseClose bool) (*lifecycle.Store, lifecycl
 		opens: make(map[string]int), polling: make(map[string]int), loseClose: loseClose,
 	}
 	supervisor := listener.Supervisor{
-		Store: ledger, Timing: timing, Logger: slog.New(slog.DiscardHandler),
+		Store: ledger, Timing: timing, ConfigurationGeneration: 1, Logger: slog.New(slog.DiscardHandler),
 		Loader: githubsets.Loader{Secrets: secrets, WrapTransport: func(http.RoundTripper) http.RoundTripper { return remote }},
 	}
 	return ledger, lease, secrets, remote, supervisor, db
@@ -382,9 +386,9 @@ func TestSupervisorRechecksCapacityAfterPollBeforeAdmitting(t *testing.T) {
 }
 
 func TestSupervisorChecksUnfinishedEffectsBeforeReleasingLease(t *testing.T) {
-	ledger, lease, _, _, supervisor, _ := supervisedFixture(t, false)
+	ledger, lease, _, remote, supervisor, _ := supervisedFixture(t, false)
 	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
+	defer cancel()
 	now := time.Now()
 	if _, err := ledger.PlanEffect(t.Context(), lease, "build", lifecycle.Effect{
 		ID: "pending-effect", Kind: "test", Target: "fixture",
@@ -392,8 +396,17 @@ func TestSupervisorChecksUnfinishedEffectsBeforeReleasingLease(t *testing.T) {
 	}, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := supervisor.Run(ctx, githubCreationConfig(), lease); !errors.Is(err, lifecycle.ErrRecoveryRequired) {
-		t.Fatalf("shutdown with unsettled effect returned %v", err)
+	done := make(chan error, 1)
+	go func() { done <- supervisor.Run(ctx, githubCreationConfig(), lease) }()
+	waitForSupervisorEvents(t, remote.events, "poll:7")
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, lifecycle.ErrRecoveryRequired) {
+			t.Fatalf("shutdown with unsettled effect returned %v", err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("supervisor did not finish shutdown")
 	}
 	current, err := ledger.Lease(t.Context(), "dev")
 	if err != nil || current == nil || current.Phase != lifecycle.LeaseActive {
