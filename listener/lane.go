@@ -128,14 +128,15 @@ func (l *profileLane) step(ctx context.Context) error {
 			return err
 		}
 	}
-	poll, cancel := boundedContext(ctx, lease.ValidUntil, s.Timing.PollTimeout)
-	defer cancel()
-	processor := Processor{Store: s.Store, Session: l.session, MaxDemandAge: s.Timing.MaxDemandAge}
-	return processor.step(poll, lease, l.profile.ID, capacity, func(delivery context.Context) *Capacity {
+	processor := Processor{
+		Store: s.Store, Session: l.session, MaxDemandAge: s.Timing.MaxDemandAge,
+		pollTimeout: s.Timing.PollTimeout, operationTimeout: s.Timing.OperationTimeout,
+	}
+	return processor.step(ctx, lease, l.profile.ID, capacity, func(delivery context.Context, current lifecycle.Lease) *Capacity {
 		if time.Now().Before(l.credentials.cooldown.deadline()) {
 			return nil
 		}
-		return l.capacity(delivery, lease)
+		return l.capacity(delivery, current)
 	})
 }
 
