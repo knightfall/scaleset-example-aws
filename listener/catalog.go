@@ -14,11 +14,11 @@ import (
 )
 
 func configurationRollout(artifact runtimeconfig.Artifact, generation int64) (lifecycle.Rollout, error) {
-	payload, err := json.Marshal(artifact)
+	digest, err := artifact.Digest()
 	if err != nil {
 		return lifecycle.Rollout{}, fmt.Errorf("encode validated runtime configuration: %w", err)
 	}
-	rollout := lifecycle.Rollout{Generation: generation, Digest: fmt.Sprintf("%x", sha256.Sum256(payload))}
+	rollout := lifecycle.Rollout{Generation: generation, Digest: digest}
 	for _, profile := range artifact.Config.Spec.Profiles {
 		desired := lifecycle.DesiredProfile{ID: profile.ID, State: profile.State}
 		if profile.State != lifecycle.ProfileDisabled {

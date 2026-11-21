@@ -46,5 +46,13 @@
     "value": "missing",
     "yamlError": "missing entry missing",
     "runtimeError": "missing ECS cluster missing"
+  },
+  {
+    "name": "repository scope with custom runner group",
+    "fixture": "asg-only-external",
+    "path": "spec.github.engineering.scopeURL",
+    "value": "https://github.com/example-engineering/repository",
+    "yamlError": "repository scope requires the default runner group",
+    "runtimeError": "repository scope requires the default runner group"
   }
 ]

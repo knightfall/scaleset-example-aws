@@ -91,6 +91,10 @@ func checkGitHubProfiles(spec Spec) (map[string]string, error) {
 			return nil, err
 		}
 		group := strings.ToLower(github.RunnerGroup)
+		_, scopePath, _ := strings.Cut(strings.TrimPrefix(scope, "https://"), "/")
+		if strings.Contains(scopePath, "/") && !strings.HasPrefix(scopePath, "enterprises/") && group != "default" {
+			return nil, fmt.Errorf("profile %s repository scope requires the default runner group", profile.ID)
+		}
 		name := setName{scope, group, strings.ToLower(github.ScaleSet)}
 		if setNames[name] {
 			return nil, fmt.Errorf("conflicting scale set mapping for profile %s", profile.ID)
