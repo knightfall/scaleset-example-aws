@@ -71,6 +71,7 @@ type Record struct {
 type Change struct {
 	Record           Record
 	ExpectedRevision int64
+	remove           bool
 }
 
 // Apply commits distinct records atomically. Revision zero expects a missing item.
@@ -100,6 +101,14 @@ func (s *Store) apply(ctx context.Context, token string, fence *types.ConditionC
 			return errors.New("lifecycle transaction repeats a record key")
 		}
 		seen[change.Record.Key] = true
+		if change.remove {
+			remove, err := change.delete(s.table)
+			if err != nil {
+				return err
+			}
+			items = append(items, types.TransactWriteItem{Delete: remove})
+			continue
+		}
 		put, err := change.put(s.table)
 		if err != nil {
 			return err
@@ -115,6 +124,20 @@ func (s *Store) apply(ctx context.Context, token string, fence *types.ConditionC
 		return transactionError(err, fence != nil)
 	}
 	return nil
+}
+
+func (c Change) delete(table string) (*types.Delete, error) {
+	if c.ExpectedRevision <= 0 || !c.Record.validIdentity() {
+		return nil, errors.New("lifecycle delete requires a valid identity and revision")
+	}
+	return &types.Delete{
+		TableName: aws.String(table), Key: c.Record.Key.item(),
+		ConditionExpression:      aws.String("#rev = :rev AND #deployment = :deployment"),
+		ExpressionAttributeNames: map[string]string{"#rev": "revision", "#deployment": "deployment"},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":rev": number(c.ExpectedRevision), ":deployment": text(c.Record.Deployment),
+		},
+	}, nil
 }
 
 func (c Change) put(table string) (*types.Put, error) {
@@ -229,8 +252,8 @@ func (r Record) item() (map[string]types.AttributeValue, error) {
 	if !r.validIdentity() || !json.Valid(r.Payload) {
 		return nil, errors.New("lifecycle record requires valid deployment keys and JSON")
 	}
-	if !r.ExpiresAt.IsZero() && (!r.DueAt.IsZero() || strings.HasPrefix(r.Key.PK, "CLAIM#") || r.Key.SK == "LEASE") {
-		return nil, errors.New("scheduled work and ownership records cannot have a TTL")
+	if !r.ExpiresAt.IsZero() && r.requiresRetention() {
+		return nil, errors.New("scheduled work and durable coordination records cannot have a TTL")
 	}
 	item := r.Key.item()
 	item["deployment"] = text(r.Deployment)
@@ -255,6 +278,24 @@ func (r Record) item() (map[string]types.AttributeValue, error) {
 		item[Expiry] = number(r.ExpiresAt.Unix())
 	}
 	return item, nil
+}
+
+func (r Record) requiresRetention() bool {
+	switch r.Key.SK {
+	case "LEASE", "CATALOG", "SESSION", "DEMAND", "ADMISSION", "EFFECTS", "EFFECT-REBUILD":
+		return true
+	}
+	if id, ok := strings.CutPrefix(r.Key.SK, "OP#"); ok {
+		effect, err := decodeEffect(r, id)
+		if err != nil {
+			return true
+		}
+		settled, err := effect.settled()
+		return err != nil || !settled || !r.DueAt.IsZero()
+	}
+	return !r.DueAt.IsZero() || strings.HasPrefix(r.Key.PK, "CLAIM#") ||
+		strings.HasPrefix(r.Key.SK, "ACTIVE-OP#") || strings.HasPrefix(r.Key.SK, "RUNNER#") ||
+		strings.HasPrefix(r.Key.SK, "RUNNER-ID#")
 }
 
 func (r Record) validIdentity() bool {

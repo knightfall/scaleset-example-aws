@@ -44,18 +44,24 @@ func (d *database) Query(_ context.Context, input *dynamodb.QueryInput, _ ...fun
 	if d.query != nil {
 		return d.query(input)
 	}
-	return d.queryEffectHistory(input)
+	return d.queryEffectRows(input)
 }
 
-func (d *database) queryEffectHistory(input *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+func (d *database) queryEffectRows(input *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
 	if aws.ToString(input.TableName) != "state" || !aws.ToBool(input.ConsistentRead) || input.IndexName != nil ||
 		aws.ToString(input.KeyConditionExpression) != "PK = :pk AND begins_with(SK, :prefix)" ||
-		stringValue(input.ExpressionAttributeValues[":prefix"]) != "OP#" || aws.ToInt32(input.Limit) != 32 {
+		aws.ToInt32(input.Limit) != 32 {
 		return nil, errors.New("unexpected query outside the legacy effect migration")
+	}
+	prefix := stringValue(input.ExpressionAttributeValues[":prefix"])
+	if prefix != "OP#" && !strings.HasPrefix(prefix, "ACTIVE-OP#") {
+		return nil, errors.New("unexpected effect query prefix")
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.effectPages++
+	if prefix == "OP#" {
+		d.effectPages++
+	}
 	partition := stringValue(input.ExpressionAttributeValues[":pk"])
 	var after string
 	if len(input.ExclusiveStartKey) != 0 {
@@ -63,7 +69,7 @@ func (d *database) queryEffectHistory(input *dynamodb.QueryInput) (*dynamodb.Que
 	}
 	var keys []lifecycle.Key
 	for key := range d.items {
-		if key.PK == partition && strings.HasPrefix(key.SK, "OP#") && key.SK > after {
+		if key.PK == partition && strings.HasPrefix(key.SK, prefix) && key.SK > after {
 			keys = append(keys, key)
 		}
 	}
@@ -98,6 +104,19 @@ func (d *database) TransactWriteItems(_ context.Context, input *dynamodb.Transac
 			}
 			continue
 		}
+		if tx.Delete != nil {
+			remove := tx.Delete
+			previous := d.items[keyOf(remove.Key)]
+			if aws.ToString(remove.TableName) != "state" || aws.ToString(remove.ConditionExpression) != "#rev = :rev AND #deployment = :deployment" ||
+				remove.ExpressionAttributeNames["#rev"] != "revision" || remove.ExpressionAttributeNames["#deployment"] != "deployment" {
+				return nil, errors.New("unexpected effect marker delete")
+			}
+			if previous == nil || numberValue(previous["revision"]) != numberValue(remove.ExpressionAttributeValues[":rev"]) ||
+				stringValue(previous["deployment"]) != stringValue(remove.ExpressionAttributeValues[":deployment"]) {
+				return nil, cancelledCondition(index, len(input.TransactItems))
+			}
+			continue
+		}
 		put := tx.Put
 		if put == nil || aws.ToString(put.TableName) != "state" {
 			return nil, errors.New("expected a write to the lifecycle table")
@@ -121,6 +140,9 @@ func (d *database) TransactWriteItems(_ context.Context, input *dynamodb.Transac
 	for _, tx := range input.TransactItems {
 		if tx.Put != nil {
 			d.items[keyOf(tx.Put.Item)] = tx.Put.Item
+		}
+		if tx.Delete != nil {
+			delete(d.items, keyOf(tx.Delete.Key))
 		}
 	}
 	return &dynamodb.TransactWriteItemsOutput{}, nil

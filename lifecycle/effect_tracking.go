@@ -14,8 +14,9 @@ import (
 )
 
 type effectTracking struct {
-	Version int   `json:"version"`
-	Epoch   int64 `json:"epoch"`
+	Version    int   `json:"version"`
+	Epoch      int64 `json:"epoch"`
+	Generation int64 `json:"indexGeneration,omitempty"`
 	// A missing count is distinct from a verified zero.
 	Count *int `json:"count"`
 }
@@ -28,9 +29,10 @@ const (
 )
 
 type effectRebuild struct {
-	Epoch int64  `json:"epoch"`
-	After string `json:"after"`
-	Count *int   `json:"count"`
+	Epoch      int64  `json:"epoch"`
+	Generation int64  `json:"indexGeneration,omitempty"`
+	After      string `json:"after"`
+	Count      *int   `json:"count"`
 }
 
 func effectTrackingKey(deployment, profile string) Key {
@@ -44,7 +46,7 @@ func (s *Store) ProfileEffectsSettled(ctx context.Context, deployment, profile s
 	if deployment == "" || profile == "" {
 		return false, errors.New("effect inspection requires deployment and profile")
 	}
-	count, revision, epoch, err := s.readEffectCount(ctx, deployment, profile)
+	tracking, revision, err := s.readEffectCount(ctx, deployment, profile)
 	if err != nil {
 		return false, err
 	}
@@ -53,16 +55,17 @@ func (s *Store) ProfileEffectsSettled(ctx context.Context, deployment, profile s
 		if err != nil {
 			return false, err
 		}
-		if lease != nil && lease.Epoch == epoch {
-			return count == 0, nil
+		if lease != nil && lease.Epoch == tracking.Epoch {
+			return *tracking.Count == 0, nil
 		}
 	}
 	var after string
 	for page := 0; page < effectPagesPerPass; page++ {
-		count, after, err = s.readEffectPage(ctx, deployment, profile, after)
-		if err != nil || count != 0 {
+		active, next, err := s.readEffectPage(ctx, deployment, profile, after)
+		if err != nil || len(active) != 0 {
 			return false, err
 		}
+		after = next
 		if after == "" {
 			return true, nil
 		}
@@ -70,17 +73,18 @@ func (s *Store) ProfileEffectsSettled(ctx context.Context, deployment, profile s
 	return false, nil
 }
 
-func (s *Store) readEffectCount(ctx context.Context, deployment, profile string) (int, int64, int64, error) {
+func (s *Store) readEffectCount(ctx context.Context, deployment, profile string) (effectTracking, int64, error) {
 	record, err := s.Get(ctx, effectTrackingKey(deployment, profile))
 	if err != nil || record == nil {
-		return 0, 0, 0, err
+		return effectTracking{}, 0, err
 	}
 	var tracking effectTracking
 	if err := json.Unmarshal(record.Payload, &tracking); err != nil || tracking.Version != 1 || tracking.Epoch <= 0 ||
-		tracking.Count == nil || *tracking.Count < 0 || !record.DueAt.IsZero() || !record.ExpiresAt.IsZero() {
-		return 0, 0, 0, errors.New("invalid durable unfinished-effect count")
+		tracking.Generation < 0 || tracking.Generation > tracking.Epoch || tracking.Count == nil || *tracking.Count < 0 ||
+		!record.DueAt.IsZero() || !record.ExpiresAt.IsZero() {
+		return effectTracking{}, 0, errors.New("invalid durable unfinished-effect count")
 	}
-	return *tracking.Count, record.Revision, tracking.Epoch, nil
+	return tracking, record.Revision, nil
 }
 
 // InitializeEffectTracking advances a fenced rebuild by a bounded number of
@@ -89,12 +93,25 @@ func (s *Store) InitializeEffectTracking(ctx context.Context, lease Lease, profi
 	if lease.Deployment == "" || profile == "" {
 		return errors.New("effect tracking requires deployment and profile")
 	}
-	_, revision, epoch, err := s.readEffectCount(ctx, lease.Deployment, profile)
+	tracking, revision, err := s.readEffectCount(ctx, lease.Deployment, profile)
 	if err != nil {
 		return err
 	}
-	if revision != 0 && epoch == lease.Epoch {
+	if tracking.Epoch == lease.Epoch && tracking.Generation > 0 {
 		return nil
+	}
+	if tracking.Generation > 0 && tracking.Epoch == lease.PriorIndexedEpoch {
+		current, err := s.currentLease(ctx, lease, now)
+		if err != nil {
+			return err
+		}
+		if current.EffectIndex && current.PriorIndexedEpoch == tracking.Epoch {
+			change, err := effectCountChange(current, profile, revision, tracking.Generation, *tracking.Count)
+			if err != nil {
+				return err
+			}
+			return s.applyOwned(ctx, current, now, "", change)
+		}
 	}
 	key := ProfileKey(lease.Deployment, profile, "EFFECT-REBUILD")
 	rebuild, checkpointRevision, err := s.readEffectRebuild(ctx, key)
@@ -103,7 +120,7 @@ func (s *Store) InitializeEffectTracking(ctx context.Context, lease Lease, profi
 	}
 	count := 0
 	var after string
-	if rebuild.Epoch == lease.Epoch {
+	if rebuild.Epoch == lease.Epoch && rebuild.Generation == lease.Epoch {
 		if rebuild.After == "" {
 			// A concurrent initializer published the completed count.
 			return ErrConflict
@@ -111,28 +128,36 @@ func (s *Store) InitializeEffectTracking(ctx context.Context, lease Lease, profi
 		count, after = *rebuild.Count, rebuild.After
 	}
 	for page := 0; page < effectPagesPerPass; page++ {
-		added, next, err := s.readEffectPage(ctx, lease.Deployment, profile, after)
+		active, next, err := s.readEffectPage(ctx, lease.Deployment, profile, after)
 		if err != nil {
 			return err
 		}
-		count += added
+		count += len(active)
 		if count < 0 {
 			return errors.New("unfinished-effect count overflow")
 		}
 		checkpoint, err := admissionChange(lease.Deployment, key, checkpointRevision, effectRebuild{
-			Epoch: lease.Epoch, After: next, Count: &count,
+			Epoch: lease.Epoch, Generation: lease.Epoch, After: next, Count: &count,
 		})
 		if err != nil {
 			return err
 		}
-		if next == "" {
-			tracking, err := effectCountChange(lease, profile, revision, count)
+		changes := []Change{checkpoint}
+		for _, id := range active {
+			marker, err := activeEffectMarker(lease.Deployment, profile, lease.Epoch, id)
 			if err != nil {
 				return err
 			}
-			return s.applyOwned(ctx, lease, now, "", checkpoint, tracking)
+			changes = append(changes, marker)
 		}
-		if err := s.applyOwned(ctx, lease, now, "", checkpoint); err != nil {
+		if next == "" {
+			tracking, err := effectCountChange(lease, profile, revision, lease.Epoch, count)
+			if err != nil {
+				return err
+			}
+			return s.applyOwned(ctx, lease, now, "", append(changes, tracking)...)
+		}
+		if err := s.applyOwned(ctx, lease, now, "", changes...); err != nil {
 			return err
 		}
 		checkpointRevision++
@@ -148,6 +173,7 @@ func (s *Store) readEffectRebuild(ctx context.Context, key Key) (effectRebuild, 
 	}
 	var rebuild effectRebuild
 	if err := json.Unmarshal(record.Payload, &rebuild); err != nil || rebuild.Epoch <= 0 ||
+		(rebuild.Generation != 0 && rebuild.Generation != rebuild.Epoch) ||
 		rebuild.Count == nil || *rebuild.Count < 0 || !record.DueAt.IsZero() || !record.ExpiresAt.IsZero() ||
 		(rebuild.After != "" && !strings.HasPrefix(rebuild.After, "OP#")) {
 		return effectRebuild{}, 0, errors.New("invalid durable effect rebuild checkpoint")
@@ -155,44 +181,82 @@ func (s *Store) readEffectRebuild(ctx context.Context, key Key) (effectRebuild, 
 	return rebuild, record.Revision, nil
 }
 
-func (s *Store) changeEffectCount(ctx context.Context, lease Lease, profile string, now time.Time, delta int) (Change, error) {
-	count, revision, epoch, err := s.readEffectCount(ctx, lease.Deployment, profile)
+func (s *Store) effectMembershipChanges(ctx context.Context, lease Lease, profile, id string, now time.Time, delta int) ([]Change, error) {
+	tracking, revision, err := s.readEffectCount(ctx, lease.Deployment, profile)
 	if err != nil {
-		return Change{}, err
+		return nil, err
 	}
-	if revision == 0 || epoch != lease.Epoch {
+	if tracking.Epoch != lease.Epoch || tracking.Generation == 0 {
 		if err := s.InitializeEffectTracking(ctx, lease, profile, now); err != nil {
-			return Change{}, err
+			return nil, err
 		}
-		count, revision, epoch, err = s.readEffectCount(ctx, lease.Deployment, profile)
+		tracking, revision, err = s.readEffectCount(ctx, lease.Deployment, profile)
 		if err != nil {
-			return Change{}, err
+			return nil, err
 		}
-		if revision == 0 || epoch != lease.Epoch {
-			return Change{}, ErrLeaseLost
+		if tracking.Epoch != lease.Epoch || tracking.Generation == 0 {
+			return nil, ErrLeaseLost
 		}
 	}
-	next := count + delta
+	next := *tracking.Count + delta
 	if next < 0 {
-		return Change{}, errors.New("unfinished-effect count underflow or overflow")
+		return nil, errors.New("unfinished-effect count underflow or overflow")
 	}
-	return effectCountChange(lease, profile, revision, next)
+	counter, err := effectCountChange(lease, profile, revision, tracking.Generation, next)
+	if err != nil {
+		return nil, err
+	}
+	marker, err := activeEffectMarker(lease.Deployment, profile, tracking.Generation, id)
+	if err != nil {
+		return nil, err
+	}
+	if delta < 0 {
+		marker.remove, marker.ExpectedRevision = true, 1
+	}
+	return []Change{counter, marker}, nil
 }
 
-func effectCountChange(lease Lease, profile string, revision int64, count int) (Change, error) {
-	return admissionChange(lease.Deployment, effectTrackingKey(lease.Deployment, profile), revision, effectTracking{Version: 1, Epoch: lease.Epoch, Count: &count})
+func effectCountChange(lease Lease, profile string, revision, generation int64, count int) (Change, error) {
+	return admissionChange(lease.Deployment, effectTrackingKey(lease.Deployment, profile), revision, effectTracking{
+		Version: 1, Epoch: lease.Epoch, Generation: generation, Count: &count,
+	})
 }
 
-func (s *Store) readEffectPage(ctx context.Context, deployment, profile, after string) (int, string, error) {
+func (s *Store) readEffectPage(ctx context.Context, deployment, profile, after string) ([]string, string, error) {
+	page, next, err := s.queryEffectRecords(ctx, deployment, profile, "OP#", after)
+	if err != nil {
+		return nil, "", err
+	}
+	var active []string
+	for _, record := range page {
+		effect, err := decodeEffect(record, strings.TrimPrefix(record.Key.SK, "OP#"))
+		if err != nil {
+			return nil, "", err
+		}
+		settled, err := effect.settled()
+		if err != nil {
+			return nil, "", err
+		}
+		if !settled {
+			if !record.ExpiresAt.IsZero() {
+				return nil, "", errors.New("unfinished effect cannot expire during index rebuild")
+			}
+			active = append(active, effect.ID)
+		}
+	}
+	return active, next, nil
+}
+
+func (s *Store) queryEffectRecords(ctx context.Context, deployment, profile, prefix, after string) ([]Record, string, error) {
 	if err := ctx.Err(); err != nil {
-		return 0, "", err
+		return nil, "", err
 	}
 	partition := ProfileKey(deployment, profile, "").PK
 	input := &dynamodb.QueryInput{
 		TableName: aws.String(s.table), ConsistentRead: aws.Bool(true), Limit: aws.Int32(effectPageSize), ScanIndexForward: aws.Bool(true),
 		KeyConditionExpression: aws.String("PK = :pk AND begins_with(SK, :prefix)"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":pk": text(partition), ":prefix": text("OP#"),
+			":pk": text(partition), ":prefix": text(prefix),
 		},
 	}
 	if after != "" {
@@ -200,38 +264,33 @@ func (s *Store) readEffectPage(ctx context.Context, deployment, profile, after s
 	}
 	page, err := s.db.Query(ctx, input)
 	if err != nil {
-		return 0, "", fmt.Errorf("read profile effects: %w", err)
+		return nil, "", fmt.Errorf("read profile effects: %w", err)
 	}
-	count := 0
+	records := make([]Record, 0, len(page.Items))
+	prior := after
 	for _, item := range page.Items {
-		settled, err := settledEffect(item, deployment, partition)
+		record, err := readRecord(item)
 		if err != nil {
-			return 0, "", err
+			return nil, "", err
 		}
-		if !settled {
-			count++
+		if record.Deployment != deployment || record.Key.PK != partition ||
+			!strings.HasPrefix(record.Key.SK, prefix) || record.Key.SK <= prior {
+			return nil, "", errors.New("invalid or unordered profile effect record")
 		}
+		records = append(records, record)
+		prior = record.Key.SK
 	}
 	if len(page.LastEvaluatedKey) == 0 {
-		return count, "", nil
+		return records, "", nil
 	}
 	cursor := readKey(page.LastEvaluatedKey)
-	if cursor.PK != partition || !strings.HasPrefix(cursor.SK, "OP#") || cursor.SK <= after {
-		return 0, "", errors.New("effect history cursor did not advance within its profile")
+	if cursor.PK != partition || !strings.HasPrefix(cursor.SK, prefix) || cursor.SK <= after || cursor.SK < prior {
+		return nil, "", errors.New("effect cursor did not advance within its profile")
 	}
-	return count, cursor.SK, nil
+	return records, cursor.SK, nil
 }
 
-func settledEffect(item map[string]types.AttributeValue, deployment, partition string) (bool, error) {
-	record, err := readRecord(item)
-	if err != nil {
-		return false, err
-	}
-	var effect Effect
-	if record.Deployment != deployment || record.Key.PK != partition ||
-		json.Unmarshal(record.Payload, &effect) != nil || effect.ID == "" || record.Key.SK != "OP#"+effect.ID {
-		return false, errors.New("invalid durable profile effect")
-	}
+func (effect Effect) settled() (bool, error) {
 	switch effect.State {
 	case EffectCancelled:
 		return true, nil

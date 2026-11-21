@@ -24,14 +24,16 @@ var (
 )
 
 type Lease struct {
-	Deployment    string    `json:"-"`
-	Revision      int64     `json:"-"`
-	Owner         string    `json:"owner"`
-	PreviousOwner string    `json:"previousOwner,omitempty"`
-	Epoch         int64     `json:"epoch"`
-	Phase         string    `json:"phase"`
-	ValidUntil    time.Time `json:"validUntil"`
-	ProofRef      string    `json:"proofRef,omitempty"`
+	Deployment        string    `json:"-"`
+	Revision          int64     `json:"-"`
+	Owner             string    `json:"owner"`
+	PreviousOwner     string    `json:"previousOwner,omitempty"`
+	Epoch             int64     `json:"epoch"`
+	Phase             string    `json:"phase"`
+	ValidUntil        time.Time `json:"validUntil"`
+	ProofRef          string    `json:"proofRef,omitempty"`
+	EffectIndex       bool      `json:"effectIndex,omitempty"`
+	PriorIndexedEpoch int64     `json:"priorIndexedEpoch,omitempty"`
 }
 
 type TakeoverProof struct {
@@ -60,6 +62,9 @@ func decodeLease(record Record) (Lease, error) {
 	lease.Deployment, lease.Revision = record.Deployment, record.Revision
 	if lease.Owner == "" || lease.Epoch < 1 || lease.ValidUntil.IsZero() {
 		return Lease{}, errors.New("invalid deployment lease identity or deadline")
+	}
+	if lease.PriorIndexedEpoch != 0 && (!lease.EffectIndex || lease.PriorIndexedEpoch != lease.Epoch-1) {
+		return Lease{}, errors.New("invalid deployment lease effect index lineage")
 	}
 	switch lease.Phase {
 	case LeaseActive, LeaseReleased:
@@ -92,7 +97,7 @@ func (s *Store) AcquireLease(ctx context.Context, deployment, owner string, now 
 	if deployment == "" || owner == "" || now.IsZero() || !until.After(now) {
 		return Lease{}, errors.New("lease requires deployment, owner and a positive duration")
 	}
-	next := Lease{Deployment: deployment, Owner: owner, Epoch: 1, Phase: LeaseActive, ValidUntil: until}
+	next := Lease{Deployment: deployment, Owner: owner, Epoch: 1, Phase: LeaseActive, ValidUntil: until, EffectIndex: true}
 	current, err := s.Lease(ctx, deployment)
 	if err != nil {
 		return Lease{}, err
@@ -107,6 +112,9 @@ func (s *Store) AcquireLease(ctx context.Context, deployment, owner string, now 
 		return Lease{}, errors.New("deployment lease epoch exhausted")
 	}
 	next.Revision, next.Epoch = current.Revision, current.Epoch+1
+	if current.EffectIndex {
+		next.PriorIndexedEpoch = current.Epoch
+	}
 	switch current.Phase {
 	case LeaseReleased:
 		return s.saveLease(ctx, next)

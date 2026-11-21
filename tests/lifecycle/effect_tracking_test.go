@@ -167,6 +167,18 @@ func TestEffectTrackingRebuildsAfterAControllerWithoutTracking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Older binaries do not carry the index writer protocol in their leases.
+	legacy.EffectIndex, legacy.PriorIndexedEpoch = false, 0
+	legacyLease, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Apply(ctx, "", lifecycle.Change{
+		Record:           record("dev", lifecycle.Key{PK: "ENV#dev", SK: "LEASE"}, string(legacyLease)),
+		ExpectedRevision: legacy.Revision,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	// An older binary journals an operation without updating EFFECTS.
 	intent := journalEffect("legacy", now)
 	intent.State, intent.Epoch = lifecycle.EffectExecuting, legacy.Epoch
@@ -179,7 +191,7 @@ func TestEffectTrackingRebuildsAfterAControllerWithoutTracking(t *testing.T) {
 	}
 	now = now.Add(2 * time.Minute)
 	recovering, err := ledger.AcquireLease(ctx, "dev", "successor", now, time.Minute)
-	if err != nil || recovering.Phase != lifecycle.LeaseRecovering {
+	if err != nil || recovering.Phase != lifecycle.LeaseRecovering || recovering.PriorIndexedEpoch != 0 {
 		t.Fatalf("successor lease: %+v, %v", recovering, err)
 	}
 	if settled, err := ledger.ProfileEffectsSettled(ctx, "dev", "build"); err != nil || settled {
@@ -189,6 +201,10 @@ func TestEffectTrackingRebuildsAfterAControllerWithoutTracking(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertEffectCount(t, ledger, recovering, "build", 1)
+	work, cursor, err := ledger.UnfinishedEffects(ctx, recovering, "build", lifecycle.Key{}, now)
+	if err != nil || cursor != (lifecycle.Key{}) || len(work) != 1 || work[0].ID != intent.ID {
+		t.Fatalf("older writer's operation not indexed: %+v, %+v, %v", work, cursor, err)
+	}
 	if _, err := ledger.ResolveEffect(ctx, recovering, "build", intent.ID, now, true, "provider:recovered"); err != nil {
 		t.Fatal(err)
 	}
@@ -283,6 +299,27 @@ func TestEffectTrackingResumesBoundedRebuildWithRetainedHistory(t *testing.T) {
 		return nil, errors.New("bounded tracking scanned expired history")
 	}
 	assertEffectCount(t, reopened, lease, "build", 1)
+
+	// The next compatible owner must enumerate the outstanding operation even
+	// when querying legacy history fails and no due-index read is available.
+	db.query = func(input *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+		if !strings.HasPrefix(stringValue(input.ExpressionAttributeValues[":prefix"]), "ACTIVE-OP#") {
+			return nil, errors.New("compatible takeover touched the settled journal or due index")
+		}
+		return db.queryEffectRows(input)
+	}
+	now = now.Add(2 * time.Minute)
+	successor, err := reopened.AcquireLease(ctx, "dev", "successor", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.InitializeEffectTracking(ctx, successor, "build", now); err != nil {
+		t.Fatal(err)
+	}
+	work, cursor, err := reopened.UnfinishedEffects(ctx, successor, "build", lifecycle.Key{}, now)
+	if err != nil || cursor != (lifecycle.Key{}) || len(work) != 1 || work[0].ID != "unfinished" || work[0].State != lifecycle.EffectUncertain {
+		t.Fatalf("takeover discovered %+v with cursor %+v: %v", work, cursor, err)
+	}
 }
 
 func TestEffectTrackingDiscardsAnOlderEpochCheckpoint(t *testing.T) {
