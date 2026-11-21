@@ -220,11 +220,7 @@ func (c *credentialCooldown) deadline() time.Time {
 	return c.until
 }
 
-func (c *credentialCooldown) record(err error) {
-	rateLimit, ok := errors.AsType[*githubsets.RateLimitError](err)
-	if !ok {
-		return
-	}
+func (c *credentialCooldown) record(rateLimit *githubsets.RateLimitError) {
 	now := time.Now()
 	until := now.Add(rateLimit.RetryAfter)
 	if rateLimit.RetryAfter <= 0 && !rateLimit.Reset.After(now) {

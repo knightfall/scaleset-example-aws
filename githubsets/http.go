@@ -23,6 +23,9 @@ var (
 type RateLimitError struct {
 	RetryAfter time.Duration
 	Reset      time.Time
+	// CredentialKey associates the error with the in-memory cooldown for the
+	// credential used on the wire, even if the connection has since rotated.
+	CredentialKey [32]byte `json:"-"`
 }
 
 func (e *RateLimitError) Error() string { return ErrRateLimited.Error() }
@@ -114,7 +117,7 @@ func githubHTTPClient(caBundle string, wrap func(http.RoundTripper) http.RoundTr
 	return client, nil
 }
 
-func requestError(operation string, err error) error {
+func requestError(operation string, err error, credentialKey [32]byte) error {
 	var status int
 	if response, ok := errors.AsType[*scaleset.RequestResponseError](err); ok && response.Response != nil {
 		status = response.Response.StatusCode
@@ -123,7 +126,7 @@ func requestError(operation string, err error) error {
 	var reason error
 	switch limit, ok := errors.AsType[*scaleset.RateLimitError](err); {
 	case ok:
-		reason = &RateLimitError{RetryAfter: limit.RetryAfter, Reset: limit.Reset}
+		reason = &RateLimitError{RetryAfter: limit.RetryAfter, Reset: limit.Reset, CredentialKey: credentialKey}
 	case status == http.StatusUnauthorized || status == http.StatusForbidden || errors.Is(err, scaleset.UnauthorizedError):
 		reason = ErrUnauthorized
 	case errors.Is(err, context.Canceled):

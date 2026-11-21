@@ -39,8 +39,16 @@ func (c *credentialState) cooldownDeadline() time.Time {
 }
 
 func (c *credentialState) recordLimit(err error) {
-	if cooldown := c.cooldown.Load(); cooldown != nil {
-		cooldown.record(err)
+	limit, ok := errors.AsType[*githubsets.RateLimitError](err)
+	if !ok {
+		return
+	}
+	cooldown := c.cooldown.Load()
+	if limit.CredentialKey != ([32]byte{}) {
+		cooldown = c.limits.forCredential(limit.CredentialKey)
+	}
+	if cooldown != nil {
+		cooldown.record(limit)
 	}
 }
 
@@ -66,7 +74,7 @@ func (c *credentialState) refresh(ctx context.Context, lane *profileLane, lease 
 				return c.connection, nil
 			}
 			if err := candidate.Validate(request); err != nil {
-				limit.record(err)
+				c.recordLimit(err)
 				c.checkAt = time.Now().Add(min(s.Timing.CredentialInterval, time.Second))
 				return c.connection, err
 			}

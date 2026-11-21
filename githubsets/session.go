@@ -15,6 +15,7 @@ type Session struct {
 	deployment        string
 	profile           string
 	credentialVersion string
+	rateLimitKey      [32]byte
 }
 
 // AdaptSession wraps an already owned SDK session and exposes sanitized facts.
@@ -39,7 +40,7 @@ func (s *Session) Poll(ctx context.Context, cursor int64, capacity int) (*lifecy
 	}
 	message, err := s.client.GetMessage(ctx, int(cursor), capacity)
 	if err != nil {
-		return nil, requestError("poll GitHub scale set", err)
+		return nil, requestError("poll GitHub scale set", err, s.rateLimitKey)
 	}
 	if message == nil {
 		return nil, nil
@@ -51,7 +52,7 @@ func (s *Session) Acquire(ctx context.Context, ids []int64) ([]int64, error) {
 	ctx = oneWriteAttempt(ctx)
 	accepted, err := s.client.AcquireJobs(ctx, ids)
 	if err != nil {
-		return nil, requestError("acquire GitHub jobs", err)
+		return nil, requestError("acquire GitHub jobs", err, s.rateLimitKey)
 	}
 	return accepted, nil
 }
@@ -61,7 +62,7 @@ func (s *Session) Acknowledge(ctx context.Context, messageID int64) error {
 		return errors.New("invalid GitHub message ID")
 	}
 	if err := s.client.DeleteMessage(oneWriteAttempt(ctx), int(messageID)); err != nil {
-		return requestError("acknowledge GitHub delivery", err)
+		return requestError("acknowledge GitHub delivery", err, s.rateLimitKey)
 	}
 	return nil
 }

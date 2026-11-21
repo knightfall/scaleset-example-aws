@@ -22,3 +22,21 @@ func TestNamedConnectionsShareCooldownOnlyForTheSameCredential(t *testing.T) {
 		t.Fatal("rate limit delayed an independent credential")
 	}
 }
+
+func TestInFlightRateLimitStillAppliesToCredentialBeforeRotation(t *testing.T) {
+	limits := &credentialLimits{byKey: make(map[[32]byte]*credentialCooldown)}
+	oldKey, newKey := [32]byte{1}, [32]byte{2}
+	connection, oldAlias := &credentialState{limits: limits}, &credentialState{limits: limits}
+	connection.cooldown.Store(limits.forCredential(oldKey))
+	oldAlias.cooldown.Store(limits.forCredential(oldKey))
+
+	// Rotate while a poll still uses the old session, then receive that poll's response.
+	connection.cooldown.Store(limits.forCredential(newKey))
+	connection.recordLimit(&githubsets.RateLimitError{RetryAfter: time.Minute, CredentialKey: oldKey})
+	if !oldAlias.cooldownDeadline().After(time.Now()) {
+		t.Fatal("an alias of the throttled credential was not delayed")
+	}
+	if !connection.cooldownDeadline().IsZero() {
+		t.Fatal("the in-flight response delayed the replacement credential")
+	}
+}

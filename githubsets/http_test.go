@@ -93,3 +93,12 @@ func TestCredentialRateLimitIdentityIsIndependentOfConnectionScope(t *testing.T)
 		t.Fatal("unrelated credentials share a rate-limit identity")
 	}
 }
+
+func TestRequestErrorPreservesTheUsedCredentialRateLimitKey(t *testing.T) {
+	key := [32]byte{1}
+	err := requestError("poll", &scaleset.RateLimitError{RetryAfter: time.Second}, key)
+	limit, ok := errors.AsType[*RateLimitError](err)
+	if !ok || limit.CredentialKey != key || limit.RetryAfter != time.Second {
+		t.Fatalf("rate limit translation = %v", err)
+	}
+}
