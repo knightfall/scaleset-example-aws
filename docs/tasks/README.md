@@ -1,12 +1,12 @@
 # Controller task specifications
 
-These files expand the remaining tasks in the [implementation plan](../implementation-plan.md) for engineering review. The repository baseline is `origin/main` at `6c73e5e16c29efcfcc39bc3fcf1c978098c93d2b`, including PR #54. Status below describes checked-in code and fixtures at that baseline. Test commands describe future acceptance evidence. They do not record a test run or live acceptance.
+These files expand the remaining tasks in the [implementation plan](../implementation-plan.md) for engineering review. The repository baseline is `main` at `12c5f3b419bcbf1dc10646db9d4125a21f99ec56`, including [PR #56](https://github.com/knightfall/scaleset-example-aws/pull/56). Status describes code and fixtures at that baseline. Test commands specify future acceptance evidence.
 
 The root CLI verifies configuration and produces offline dry-run reports. The lifecycle store, credentials, listeners and provider-neutral inventory coordinator have fixture coverage. Active runtime wiring, real provisioners, secure JIT delivery, deployment stacks and live canaries remain to be delivered. Existing synthesis covers an offline toolchain fixture. [Root entry point](../../main.go) · [CDK test](../../cdk/test/toolchain.test.ts)
 
 | Task | Specification | Baseline state |
 | --- | --- | --- |
-| T10 | [Reconciliation, safe dispatch and retirement](T10.md) | In progress. Inventory coordinator and unfinished-effect count merged. |
+| T10 | [Reconciliation, safe dispatch and retirement](T10.md) | In progress. Inventory, the unfinished-effect count and its bounded rebuild are merged. Active-only discovery is in [PR #57](https://github.com/knightfall/scaleset-example-aws/pull/57). |
 | T11 | [Secure one-job JIT handoff](T11.md) | Pending. SDK wire fixtures exist. |
 | T12 | [Existing ASG preflight and inventory](T12.md) | Pending. SDK wire fixtures exist. |
 | T13 | [ASG scaling and targeted retirement](T13.md) | Pending. |
@@ -27,7 +27,7 @@ The root CLI verifies configuration and produces offline dry-run reports. The li
 
 ## Implementation order
 
-Start with [T10c](T10.md#t10c-storage-and-recovery-contract) for the durable index and request journal, then [T10d](T10.md#t10d-dispatch-and-admission) for the provider-neutral fake-provider dispatcher and [T10e](T10.md#t10e-shared-ownership-and-drain) for ownership and drain. [T11](T11.md#implementation-slices) splits reusable SDK/storage primitives from the handoff protocol. T12 and T15 provide read-only inventory against the T10d boundary for final runtime wiring and T05’s optional AWS inspection. T18 and T19 agree on runtime inputs before host binding. T18 consumes the T10e retirement and T11 IAM contracts. T23 can verify GitHub against an approved disposable executor once T09 and T11 are ready, independently of the full AWS and CDK matrix. T24–T27 use the approved backend and deployment integrations.
+Finish [T10c](T10.md#t10c-storage-and-recovery-contract) with active-only discovery and the durable request journal, then [T10d](T10.md#t10d-dispatch-and-admission) for the provider-neutral fake-provider dispatcher and [T10e](T10.md#t10e-shared-ownership-and-drain) for ownership and drain. [T11](T11.md#implementation-slices) splits reusable SDK/storage primitives from the handoff protocol. T12 and T15 provide read-only inventory against the T10d boundary for final runtime wiring and T05’s optional AWS inspection. T18 and T19 agree on runtime inputs before host binding. T18 consumes the T10e retirement and T11 IAM contracts. T23 can verify GitHub against an approved disposable executor once T09 and T11 are ready, independently of the full AWS and CDK matrix. T24–T27 use the approved backend and deployment integrations.
 
 Earlier task definitions remain in the [implementation plan](../implementation-plan.md#implementation-tasks). Their remaining obligations are assigned below so they stay in scope without duplicating completed work.
 
@@ -50,11 +50,11 @@ For review, cite the task and section, describe the failure or missing evidence,
 
 ## Antigravity review disposition
 
-This revision addresses F1–F8 from the review of `69e7868` in the specifications. D1–D9 below record design commitments and tests, with open service proof kept as a gate. The baseline application still lacks these implementation slices.
+This revision addresses F1–F8 from the review of `69e7868` in the specifications. D1–D9 below record design commitments, baseline progress and tests, with open service proof kept as a gate.
 
 | Decision and finding | Specification change | Proof and unresolved gate |
 | --- | --- | --- |
-| D1 / F1 · Bounded discovery | [T10c](T10.md#t10c-storage-and-recovery-contract) gives the active index, count/revision transaction, page budget, writer continuity and rebuild checkpoint. [T18](T18.md) covers retention and restore. | Test rollback, interruption, 10,000 history rows, fair profiles and empty GSI. Untrusted readiness closes mutation. |
+| D1 / F1 · Bounded discovery | [T10c](T10.md#t10c-storage-and-recovery-contract) records the merged checkpointed rebuild and defines the active index, count/revision transaction and writer continuity. [T18](T18.md) covers retention and restore. | Baseline fixtures cover interrupted rebuilds, 10,000 retained effects and startup of a rollout that retires a profile. Verify active discovery with an empty GSI and fair scheduling across profiles. Untrusted readiness closes mutation. |
 | D2 / F2–F4 · Dispatch and admission | [T10d](T10.md#t10d-dispatch-and-admission), [T13](T13.md) and [T16](T16.md) use immutable nonsecret requests, revision-checked dispatch and evidence-specific outcomes. Admission credits only exact occupied-slot attribution. | Test changed evidence between plan/dispatch, readback ambiguity, definitive rejection and the cap-10 regression. The review's aggregate subtraction would allow two unsafe acquisitions in that case. |
 | D3 / F5 · Handoff and exit | [T11](T11.md) specifies adapter, exact role/session key lookup, authenticated envelope and consume/revoke race. [T14](T14.md) and [T17](T17.md) separate EC2 isolated reporting from ECS task-terminal evidence. | Test cross-principal denial and workflow visibility with two real identities per backend. A task's `STOPPED` status is resource evidence. Job and registration state need independent proof. |
 | D4 / F8 · GitHub service behavior | [T23](T23.md) maps early opt-in integration cases to PAT/App, assignment, drain, session recovery and connected-idle gates. | Require target-specific ordered results. Protect reservations, sessions and idle runners when the target cannot supply evidence. |
