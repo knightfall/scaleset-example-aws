@@ -20,12 +20,26 @@ type effectTracking struct {
 	Count *int `json:"count"`
 }
 
+var ErrEffectTrackingPending = errors.New("unfinished-effect count rebuild is pending")
+
+const (
+	effectPageSize     = 32
+	effectPagesPerPass = 2
+)
+
+type effectRebuild struct {
+	Epoch int64  `json:"epoch"`
+	After string `json:"after"`
+	Count *int   `json:"count"`
+}
+
 func effectTrackingKey(deployment, profile string) Key {
 	return ProfileKey(deployment, profile, "EFFECTS")
 }
 
 // ProfileEffectsSettled uses a strongly consistent count maintained with journal
-// transitions. Profiles predating tracking fall back to their base-table history.
+// transitions. Without a current count, a bounded read can prove a small
+// history clear. An incomplete read keeps the profile unsettled.
 func (s *Store) ProfileEffectsSettled(ctx context.Context, deployment, profile string) (bool, error) {
 	if deployment == "" || profile == "" {
 		return false, errors.New("effect inspection requires deployment and profile")
@@ -43,8 +57,17 @@ func (s *Store) ProfileEffectsSettled(ctx context.Context, deployment, profile s
 			return count == 0, nil
 		}
 	}
-	count, err = s.scanEffectCount(ctx, deployment, profile, 1)
-	return count == 0 && err == nil, err
+	var after string
+	for page := 0; page < effectPagesPerPass; page++ {
+		count, after, err = s.readEffectPage(ctx, deployment, profile, after)
+		if err != nil || count != 0 {
+			return false, err
+		}
+		if after == "" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *Store) readEffectCount(ctx context.Context, deployment, profile string) (int, int64, int64, error) {
@@ -60,8 +83,8 @@ func (s *Store) readEffectCount(ctx context.Context, deployment, profile string)
 	return *tracking.Count, record.Revision, tracking.Epoch, nil
 }
 
-// InitializeEffectTracking rebuilds older tracking under the current lease.
-// Epoch binding prevents a count from hiding writes by an older controller.
+// InitializeEffectTracking advances a fenced rebuild by a bounded number of
+// pages. Callers can retry ErrEffectTrackingPending on a later pass.
 func (s *Store) InitializeEffectTracking(ctx context.Context, lease Lease, profile string, now time.Time) error {
 	if lease.Deployment == "" || profile == "" {
 		return errors.New("effect tracking requires deployment and profile")
@@ -73,78 +96,130 @@ func (s *Store) InitializeEffectTracking(ctx context.Context, lease Lease, profi
 	if revision != 0 && epoch == lease.Epoch {
 		return nil
 	}
-	change, err := s.changeEffectCount(ctx, lease, profile, 0)
+	key := ProfileKey(lease.Deployment, profile, "EFFECT-REBUILD")
+	rebuild, checkpointRevision, err := s.readEffectRebuild(ctx, key)
 	if err != nil {
 		return err
 	}
-	return s.applyOwned(ctx, lease, now, "", change)
+	count := 0
+	var after string
+	if rebuild.Epoch == lease.Epoch {
+		if rebuild.After == "" {
+			// A concurrent initializer published the completed count.
+			return ErrConflict
+		}
+		count, after = *rebuild.Count, rebuild.After
+	}
+	for page := 0; page < effectPagesPerPass; page++ {
+		added, next, err := s.readEffectPage(ctx, lease.Deployment, profile, after)
+		if err != nil {
+			return err
+		}
+		count += added
+		if count < 0 {
+			return errors.New("unfinished-effect count overflow")
+		}
+		checkpoint, err := admissionChange(lease.Deployment, key, checkpointRevision, effectRebuild{
+			Epoch: lease.Epoch, After: next, Count: &count,
+		})
+		if err != nil {
+			return err
+		}
+		if next == "" {
+			tracking, err := effectCountChange(lease, profile, revision, count)
+			if err != nil {
+				return err
+			}
+			return s.applyOwned(ctx, lease, now, "", checkpoint, tracking)
+		}
+		if err := s.applyOwned(ctx, lease, now, "", checkpoint); err != nil {
+			return err
+		}
+		checkpointRevision++
+		after = next
+	}
+	return ErrEffectTrackingPending
 }
 
-func (s *Store) changeEffectCount(ctx context.Context, lease Lease, profile string, delta int) (Change, error) {
+func (s *Store) readEffectRebuild(ctx context.Context, key Key) (effectRebuild, int64, error) {
+	record, err := s.Get(ctx, key)
+	if err != nil || record == nil {
+		return effectRebuild{}, 0, err
+	}
+	var rebuild effectRebuild
+	if err := json.Unmarshal(record.Payload, &rebuild); err != nil || rebuild.Epoch <= 0 ||
+		rebuild.Count == nil || *rebuild.Count < 0 || !record.DueAt.IsZero() || !record.ExpiresAt.IsZero() ||
+		(rebuild.After != "" && !strings.HasPrefix(rebuild.After, "OP#")) {
+		return effectRebuild{}, 0, errors.New("invalid durable effect rebuild checkpoint")
+	}
+	return rebuild, record.Revision, nil
+}
+
+func (s *Store) changeEffectCount(ctx context.Context, lease Lease, profile string, now time.Time, delta int) (Change, error) {
 	count, revision, epoch, err := s.readEffectCount(ctx, lease.Deployment, profile)
 	if err != nil {
 		return Change{}, err
 	}
 	if revision == 0 || epoch != lease.Epoch {
-		// The conditional counter creation fences concurrent first transitions.
-		// Existing planned and uncertain effects must survive this migration.
-		count, err = s.scanEffectCount(ctx, lease.Deployment, profile, 0)
+		if err := s.InitializeEffectTracking(ctx, lease, profile, now); err != nil {
+			return Change{}, err
+		}
+		count, revision, epoch, err = s.readEffectCount(ctx, lease.Deployment, profile)
 		if err != nil {
 			return Change{}, err
+		}
+		if revision == 0 || epoch != lease.Epoch {
+			return Change{}, ErrLeaseLost
 		}
 	}
 	next := count + delta
 	if next < 0 {
 		return Change{}, errors.New("unfinished-effect count underflow or overflow")
 	}
-	return admissionChange(lease.Deployment, effectTrackingKey(lease.Deployment, profile), revision, effectTracking{Version: 1, Epoch: lease.Epoch, Count: &next})
+	return effectCountChange(lease, profile, revision, next)
 }
 
-// stopAfter bounds read-only absence checks. Zero counts all legacy work while
-// initializing the durable counter in the same transaction as its first change.
-func (s *Store) scanEffectCount(ctx context.Context, deployment, profile string, stopAfter int) (int, error) {
+func effectCountChange(lease Lease, profile string, revision int64, count int) (Change, error) {
+	return admissionChange(lease.Deployment, effectTrackingKey(lease.Deployment, profile), revision, effectTracking{Version: 1, Epoch: lease.Epoch, Count: &count})
+}
+
+func (s *Store) readEffectPage(ctx context.Context, deployment, profile, after string) (int, string, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, "", err
+	}
 	partition := ProfileKey(deployment, profile, "").PK
 	input := &dynamodb.QueryInput{
-		TableName: aws.String(s.table), ConsistentRead: aws.Bool(true), Limit: aws.Int32(100), ScanIndexForward: aws.Bool(true),
+		TableName: aws.String(s.table), ConsistentRead: aws.Bool(true), Limit: aws.Int32(effectPageSize), ScanIndexForward: aws.Bool(true),
 		KeyConditionExpression: aws.String("PK = :pk AND begins_with(SK, :prefix)"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":pk": text(partition), ":prefix": text("OP#"),
 		},
 	}
-	count := 0
-	for {
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
-		page, err := s.db.Query(ctx, input)
-		if err != nil {
-			return 0, fmt.Errorf("read profile effects: %w", err)
-		}
-		for _, item := range page.Items {
-			settled, err := settledEffect(item, deployment, partition)
-			if err != nil {
-				return 0, err
-			}
-			if settled {
-				continue
-			}
-			count++
-			if count < 0 {
-				return 0, errors.New("unfinished-effect count overflow")
-			}
-			if stopAfter > 0 && count == stopAfter {
-				return count, nil
-			}
-		}
-		if len(page.LastEvaluatedKey) == 0 {
-			return count, nil
-		}
-		cursor := readKey(page.LastEvaluatedKey)
-		if cursor.PK != partition || !strings.HasPrefix(cursor.SK, "OP#") || cursor.SK <= readKey(input.ExclusiveStartKey).SK {
-			return 0, errors.New("effect history cursor did not advance within its profile")
-		}
-		input.ExclusiveStartKey = page.LastEvaluatedKey
+	if after != "" {
+		input.ExclusiveStartKey = Key{PK: partition, SK: after}.item()
 	}
+	page, err := s.db.Query(ctx, input)
+	if err != nil {
+		return 0, "", fmt.Errorf("read profile effects: %w", err)
+	}
+	count := 0
+	for _, item := range page.Items {
+		settled, err := settledEffect(item, deployment, partition)
+		if err != nil {
+			return 0, "", err
+		}
+		if !settled {
+			count++
+		}
+	}
+	if len(page.LastEvaluatedKey) == 0 {
+		return count, "", nil
+	}
+	cursor := readKey(page.LastEvaluatedKey)
+	if cursor.PK != partition || !strings.HasPrefix(cursor.SK, "OP#") || cursor.SK <= after {
+		return 0, "", errors.New("effect history cursor did not advance within its profile")
+	}
+	return count, cursor.SK, nil
 }
 
 func settledEffect(item map[string]types.AttributeValue, deployment, partition string) (bool, error) {

@@ -163,7 +163,7 @@ func (s *Store) settleEffect(ctx context.Context, lease Lease, profile string, e
 	if err != nil {
 		return Effect{}, err
 	}
-	counter, err := s.changeEffectCount(ctx, lease, profile, -1)
+	counter, err := s.changeEffectCount(ctx, lease, profile, now, -1)
 	if err != nil {
 		return Effect{}, err
 	}
@@ -188,11 +188,13 @@ func (s *Store) saveEffect(ctx context.Context, lease Lease, profile string, eff
 	}
 	changes := []Change{change}
 	if countDelta != 0 {
-		counter, err := s.changeEffectCount(ctx, lease, profile, countDelta)
+		counter, err := s.changeEffectCount(ctx, lease, profile, now, countDelta)
 		if err != nil {
 			return Effect{}, err
 		}
 		changes = append(changes, counter)
+	} else if err := s.InitializeEffectTracking(ctx, lease, profile, now); err != nil {
+		return Effect{}, err
 	}
 	if err := s.ApplyFenced(ctx, lease, now, "", changes...); err != nil {
 		return Effect{}, err

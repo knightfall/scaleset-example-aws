@@ -27,6 +27,7 @@ type database struct {
 	beforeWrite func(*dynamodb.TransactWriteItemsInput) error
 	lastTxn     *dynamodb.TransactWriteItemsInput
 	reads       int
+	effectPages int
 }
 
 func (d *database) GetItem(_ context.Context, input *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
@@ -45,28 +46,26 @@ func (d *database) Query(_ context.Context, input *dynamodb.QueryInput, _ ...fun
 	}
 	if aws.ToString(input.TableName) != "state" || !aws.ToBool(input.ConsistentRead) || input.IndexName != nil ||
 		aws.ToString(input.KeyConditionExpression) != "PK = :pk AND begins_with(SK, :prefix)" ||
-		stringValue(input.ExpressionAttributeValues[":prefix"]) != "OP#" || aws.ToInt32(input.Limit) != 100 {
+		stringValue(input.ExpressionAttributeValues[":prefix"]) != "OP#" || aws.ToInt32(input.Limit) != 32 {
 		return nil, errors.New("unexpected query outside the legacy effect migration")
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.effectPages++
 	partition := stringValue(input.ExpressionAttributeValues[":pk"])
+	var after string
+	if len(input.ExclusiveStartKey) != 0 {
+		after = keyOf(input.ExclusiveStartKey).SK
+	}
 	var keys []lifecycle.Key
 	for key := range d.items {
-		if key.PK == partition && strings.HasPrefix(key.SK, "OP#") {
+		if key.PK == partition && strings.HasPrefix(key.SK, "OP#") && key.SK > after {
 			keys = append(keys, key)
 		}
 	}
 	slices.SortFunc(keys, func(a, b lifecycle.Key) int { return strings.Compare(a.SK, b.SK) })
 	page := &dynamodb.QueryOutput{}
-	var after string
-	if len(input.ExclusiveStartKey) != 0 {
-		after = keyOf(input.ExclusiveStartKey).SK
-	}
 	for _, key := range keys {
-		if key.SK <= after {
-			continue
-		}
 		if len(page.Items) == int(aws.ToInt32(input.Limit)) {
 			break
 		}
