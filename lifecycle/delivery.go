@@ -34,11 +34,22 @@ type DemandObservation struct {
 }
 
 type SessionProgress struct {
-	SessionID        string             `json:"sessionId"`
-	LastAcknowledged int64              `json:"lastAcknowledged"`
-	PendingMessageID int64              `json:"pendingMessageId"`
-	Demand           *DemandObservation `json:"demand,omitempty"`
-	revision         int64
+	SessionID               string             `json:"sessionId"`
+	LastAcknowledged        int64              `json:"lastAcknowledged"`
+	PendingMessageID        int64              `json:"pendingMessageId"`
+	PendingZeroMessage      bool               `json:"pendingZeroMessage,omitempty"`
+	AcknowledgedZeroMessage bool               `json:"acknowledgedZeroMessage,omitempty"`
+	Demand                  *DemandObservation `json:"demand,omitempty"`
+	revision                int64
+}
+
+// HasPendingMessage distinguishes a real message zero from an empty cursor.
+func (p SessionProgress) HasPendingMessage() bool {
+	return p.PendingMessageID > 0 || p.PendingZeroMessage
+}
+
+func (p SessionProgress) acknowledged(id int64) bool {
+	return (p.LastAcknowledged > 0 || p.AcknowledgedZeroMessage) && id <= p.LastAcknowledged
 }
 
 type Delivery struct {
@@ -65,8 +76,10 @@ func (s *Store) SessionProgress(ctx context.Context, deployment, profile string)
 		return progress, err
 	}
 	if err := json.Unmarshal(record.Payload, &progress); err != nil || progress.SessionID == "" ||
-		progress.LastAcknowledged < 0 ||
-		(progress.PendingMessageID != 0 && progress.PendingMessageID <= progress.LastAcknowledged) {
+		progress.LastAcknowledged < 0 || progress.PendingMessageID < 0 ||
+		(progress.PendingZeroMessage && progress.PendingMessageID != 0) ||
+		(progress.AcknowledgedZeroMessage && progress.LastAcknowledged != 0) ||
+		(progress.HasPendingMessage() && progress.acknowledged(progress.PendingMessageID)) {
 		return SessionProgress{}, errors.New("invalid durable session progress")
 	}
 	if progress.Demand != nil && (!progress.Demand.valid() || progress.Demand.ObservedAt.IsZero()) {
@@ -118,7 +131,7 @@ func (s *Store) PersistDelivery(ctx context.Context, lease Lease, profile, sessi
 	if session == "" || progress.SessionID != session {
 		return ErrSessionChanged
 	}
-	if progress.PendingMessageID != 0 && progress.PendingMessageID != delivery.MessageID {
+	if progress.HasPendingMessage() && progress.PendingMessageID != delivery.MessageID {
 		return errors.New("a different delivery is still pending")
 	}
 	message, err := delivery.receipt(session, now)
@@ -132,7 +145,7 @@ func (s *Store) PersistDelivery(ctx context.Context, lease Lease, profile, sessi
 	if entry.Delivery != nil {
 		return nil
 	}
-	if delivery.MessageID <= progress.LastAcknowledged {
+	if progress.acknowledged(delivery.MessageID) {
 		return errors.New("out-of-order delivery has no durable facts")
 	}
 	key := inboxKey(lease.Deployment, profile, message)
@@ -168,6 +181,7 @@ func (s *Store) PersistDelivery(ctx context.Context, lease Lease, profile, sessi
 		return err
 	}
 	progress.PendingMessageID = delivery.MessageID
+	progress.PendingZeroMessage = delivery.MessageID == 0
 	if delivery.Stats != nil {
 		progress.Demand = &DemandObservation{
 			DemandCounts: *delivery.Stats, ObservedAt: entry.ReceivedAt, MessageID: delivery.MessageID,
@@ -177,7 +191,7 @@ func (s *Store) PersistDelivery(ctx context.Context, lease Lease, profile, sessi
 }
 
 func (d Delivery) validate() error {
-	if d.MessageID <= 0 || (d.Stats != nil && !d.Stats.valid()) {
+	if d.MessageID < 0 || (d.Stats != nil && !d.Stats.valid()) {
 		return errors.New("invalid delivery ID or demand observation")
 	}
 	for _, id := range d.Offers {
@@ -217,7 +231,7 @@ func (s *Store) AuthorizeAcknowledgement(ctx context.Context, lease Lease, profi
 	if err != nil {
 		return err
 	}
-	if progress.SessionID != session || id <= 0 || progress.PendingMessageID != id {
+	if progress.SessionID != session || id < 0 || !progress.HasPendingMessage() || progress.PendingMessageID != id {
 		return ErrSessionChanged
 	}
 	entry, revision, err := s.loadDelivery(ctx, lease.Deployment, profile, session, id)
@@ -240,13 +254,13 @@ func (s *Store) ConfirmAcknowledgement(ctx context.Context, lease Lease, profile
 	if err != nil {
 		return err
 	}
-	if progress.SessionID != session || id <= 0 {
+	if progress.SessionID != session || id < 0 {
 		return ErrSessionChanged
 	}
-	if id <= progress.LastAcknowledged {
+	if progress.acknowledged(id) {
 		return nil
 	}
-	if progress.PendingMessageID != id {
+	if !progress.HasPendingMessage() || progress.PendingMessageID != id {
 		return ErrSessionChanged
 	}
 	entry, _, err := s.loadDelivery(ctx, lease.Deployment, profile, session, id)
@@ -257,7 +271,9 @@ func (s *Store) ConfirmAcknowledgement(ctx context.Context, lease Lease, profile
 		return errors.New("no durable acknowledgement intent")
 	}
 	progress.LastAcknowledged = id
+	progress.AcknowledgedZeroMessage = id == 0
 	progress.PendingMessageID = 0
+	progress.PendingZeroMessage = false
 	return s.writeProgress(ctx, lease, profile, now, progress)
 }
 
