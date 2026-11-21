@@ -65,18 +65,28 @@ func (s *Store) ObserveResource(ctx context.Context, lease Lease, profile string
 	if err != nil {
 		return err
 	}
+	previous := *executor
 	prior := executor.Resource
+	if (prior.State == ResourceStarting || prior.State == ResourceRunning) && prior.ObservedAt.After(executor.ResourceLiveAt) {
+		executor.ResourceLiveAt = prior.ObservedAt
+	}
+	if (observation.State == ResourceStarting || observation.State == ResourceRunning) && observation.ObservedAt.After(executor.ResourceLiveAt) {
+		executor.ResourceLiveAt = observation.ObservedAt
+	}
+	if prior.State == ResourceTerminal && !executor.ResourceLiveAt.IsZero() && !executor.ResourceLiveAt.Before(prior.ObservedAt) {
+		executor.Conflicted = true
+	}
+	if observation.State == ResourceTerminal && !executor.ResourceLiveAt.IsZero() && !executor.ResourceLiveAt.Before(observation.ObservedAt) {
+		executor.Conflicted = true
+	}
 	lateTerminal := observation.State == ResourceTerminal && prior.State != ResourceTerminal
 	older := observation.ObservedAt.Before(prior.ObservedAt)
 	if older && !lateTerminal {
-		return nil
-	}
-	if older && prior.State != ResourceUnknown {
-		executor.Conflicted = true
+		return s.saveExecutor(ctx, lease, profile, *executor, previous, now)
 	}
 	if prior.State == ResourceTerminal {
 		if observation.State == ResourceTerminal || observation.State == ResourceUnknown {
-			return nil
+			return s.saveExecutor(ctx, lease, profile, *executor, previous, now)
 		}
 		executor.Conflicted = true
 	} else {
@@ -91,7 +101,7 @@ func (s *Store) ObserveResource(ctx context.Context, lease Lease, profile string
 		}
 		executor.Resource = observation
 	}
-	return s.saveExecutor(ctx, lease, profile, *executor, now)
+	return s.saveExecutor(ctx, lease, profile, *executor, previous, now)
 }
 
 func (s *Store) ObserveProcess(ctx context.Context, lease Lease, profile string, binding ExecutorBinding, observation ProcessObservation, now time.Time) error {
@@ -106,18 +116,28 @@ func (s *Store) ObserveProcess(ctx context.Context, lease Lease, profile string,
 	if executor.Runner != observation.Runner {
 		return ErrExecutorIdentity
 	}
+	previous := *executor
 	prior := executor.Process
+	if prior.State == ProcessReady && prior.ObservedAt.After(executor.ProcessLiveAt) {
+		executor.ProcessLiveAt = prior.ObservedAt
+	}
+	if observation.State == ProcessReady && observation.ObservedAt.After(executor.ProcessLiveAt) {
+		executor.ProcessLiveAt = observation.ObservedAt
+	}
+	if prior.State == ProcessExited && !executor.ProcessLiveAt.IsZero() && !executor.ProcessLiveAt.Before(prior.ObservedAt) {
+		executor.Conflicted = true
+	}
+	if observation.State == ProcessExited && !executor.ProcessLiveAt.IsZero() && !executor.ProcessLiveAt.Before(observation.ObservedAt) {
+		executor.Conflicted = true
+	}
 	lateExit := observation.State == ProcessExited && prior.State != ProcessExited
 	older := observation.ObservedAt.Before(prior.ObservedAt)
 	if older && !lateExit {
-		return nil
-	}
-	if older && prior.State != ProcessUnknown {
-		executor.Conflicted = true
+		return s.saveExecutor(ctx, lease, profile, *executor, previous, now)
 	}
 	if prior.State == ProcessExited {
 		if observation.State == ProcessExited || observation.State == ProcessUnknown {
-			return nil
+			return s.saveExecutor(ctx, lease, profile, *executor, previous, now)
 		}
 		executor.Conflicted = true
 	} else {
@@ -126,7 +146,7 @@ func (s *Store) ObserveProcess(ctx context.Context, lease Lease, profile string,
 		}
 		executor.Process = observation
 	}
-	return s.saveExecutor(ctx, lease, profile, *executor, now)
+	return s.saveExecutor(ctx, lease, profile, *executor, previous, now)
 }
 
 func (s *Store) boundExecutor(ctx context.Context, deployment, profile string, binding ExecutorBinding) (*Executor, error) {
@@ -143,7 +163,10 @@ func (s *Store) boundExecutor(ctx context.Context, deployment, profile string, b
 	return executor, nil
 }
 
-func (s *Store) saveExecutor(ctx context.Context, lease Lease, profile string, executor Executor, now time.Time) error {
+func (s *Store) saveExecutor(ctx context.Context, lease Lease, profile string, executor, previous Executor, now time.Time) error {
+	if executor == previous {
+		return nil
+	}
 	change, err := executor.change(lease.Deployment, profile)
 	if err != nil {
 		return err

@@ -75,6 +75,12 @@ func TestExecutorClassificationRequiresFreshResourceAndExactProcessEvidence(t *t
 		{"future exit", func(e *lifecycle.Executor) { e.Process.ObservedAt = observedAt.Add(time.Nanosecond) }},
 		{"exit grace incomplete", func(e *lifecycle.Executor) { e.Process.ObservedAt = observedAt.Add(-5*time.Second + time.Nanosecond) }},
 		{"another job runner", func(e *lifecycle.Executor) { e.Attempt.RunnerID++ }},
+		{"ready evidence after exit", func(e *lifecycle.Executor) { e.ProcessLiveAt = e.Process.ObservedAt.Add(time.Nanosecond) }},
+		{"future live evidence", func(e *lifecycle.Executor) { e.ResourceLiveAt = observedAt.Add(time.Nanosecond) }},
+		{"live evidence at provider termination", func(e *lifecycle.Executor) {
+			e.Resource.State = lifecycle.ResourceTerminal
+			e.ResourceLiveAt = e.Resource.ObservedAt
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := executorEvidence(lifecycle.ResourceRunning, lifecycle.ProcessExited, lifecycle.JobCompleted)

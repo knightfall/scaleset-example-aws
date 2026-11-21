@@ -2,6 +2,7 @@ package lifecycle_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -193,5 +194,98 @@ func TestDelayedTerminalObservationProtectsAgainstLaterLiveEvidence(t *testing.T
 	got = readTestExecutor(t, ledger, lease, "build", binding)
 	if !got.Conflicted || got.Resource != terminal {
 		t.Fatalf("delayed termination disappeared behind presence: %+v", got)
+	}
+}
+
+func TestUnknownRefreshCannotHideConflictingResourceEvidence(t *testing.T) {
+	for _, lateLive := range []bool{false, true} {
+		t.Run(fmt.Sprint(lateLive), func(t *testing.T) {
+			ctx := t.Context()
+			now := admissionTime
+			ledger, _, lease := admissionStore(t, now)
+			binding := lifecycle.ExecutorBinding{AllocationID: "owned", ResourceID: "resource-1", Incarnation: "boot-1"}
+			if err := ledger.BindExecutor(ctx, lease, "build", binding, now); err != nil {
+				t.Fatal(err)
+			}
+			observations := []lifecycle.ResourceObservation{
+				{State: lifecycle.ResourceRunning, ObservedAt: now.Add(-time.Second), Reference: "inventory:live"},
+				{State: lifecycle.ResourceUnknown, ObservedAt: now, Reference: "inventory:unknown"},
+				{State: lifecycle.ResourceTerminal, ObservedAt: now.Add(-2 * time.Second), Reference: "inventory:terminal"},
+			}
+			if lateLive {
+				observations[0], observations[1] = observations[1], observations[0]
+			}
+			for _, observation := range observations {
+				if err := ledger.ObserveResource(ctx, lease, "build", binding, observation, now); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := readTestExecutor(t, ledger, lease, "build", binding)
+			if !got.Conflicted || !got.ResourceLiveAt.Equal(now.Add(-time.Second)) || got.Resource.State != lifecycle.ResourceTerminal {
+				t.Fatalf("unknown refresh erased live/terminal contradiction: %+v", got)
+			}
+		})
+	}
+}
+
+func TestUnknownRefreshCannotHideConflictingProcessEvidence(t *testing.T) {
+	for _, lateLive := range []bool{false, true} {
+		t.Run(fmt.Sprint(lateLive), func(t *testing.T) {
+			ctx := t.Context()
+			now := admissionTime
+			ledger, _, lease := admissionStore(t, now)
+			binding := lifecycle.ExecutorBinding{AllocationID: "owned", ResourceID: "resource-1", Incarnation: "boot-1"}
+			runner := lifecycle.RunnerIdentity{ID: 7, Name: "runner-7"}
+			bindTestExecutor(t, ledger, lease, "build", binding, runner)
+			observations := []lifecycle.ProcessObservation{
+				{Runner: runner, State: lifecycle.ProcessReady, ObservedAt: now.Add(-time.Second), Reference: "bootstrap:ready"},
+				{Runner: runner, State: lifecycle.ProcessUnknown, ObservedAt: now, Reference: "bootstrap:unknown"},
+				{Runner: runner, State: lifecycle.ProcessExited, ObservedAt: now.Add(-2 * time.Second), Reference: "bootstrap:exit"},
+			}
+			if lateLive {
+				observations[0], observations[1] = observations[1], observations[0]
+			}
+			for _, observation := range observations {
+				if err := ledger.ObserveProcess(ctx, lease, "build", binding, observation, now); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := readTestExecutor(t, ledger, lease, "build", binding)
+			if !got.Conflicted || !got.ProcessLiveAt.Equal(now.Add(-time.Second)) || got.Process.State != lifecycle.ProcessExited {
+				t.Fatalf("unknown refresh erased ready/exit contradiction: %+v", got)
+			}
+		})
+	}
+}
+
+func TestTerminalEvidenceAfterLiveAndUnknownObservationsRemainsUnconflicted(t *testing.T) {
+	ctx := t.Context()
+	now := admissionTime
+	ledger, _, lease := admissionStore(t, now)
+	binding := lifecycle.ExecutorBinding{AllocationID: "owned", ResourceID: "resource-1", Incarnation: "boot-1"}
+	runner := lifecycle.RunnerIdentity{ID: 7, Name: "runner-7"}
+	bindTestExecutor(t, ledger, lease, "build", binding, runner)
+	for _, observation := range []lifecycle.ResourceObservation{
+		{State: lifecycle.ResourceRunning, ObservedAt: now.Add(-3 * time.Second), Reference: "inventory:live"},
+		{State: lifecycle.ResourceUnknown, ObservedAt: now.Add(-2 * time.Second), Reference: "inventory:unknown"},
+		{State: lifecycle.ResourceTerminal, ObservedAt: now.Add(-time.Second), Reference: "inventory:terminal"},
+	} {
+		if err := ledger.ObserveResource(ctx, lease, "build", binding, observation, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, observation := range []lifecycle.ProcessObservation{
+		{Runner: runner, State: lifecycle.ProcessReady, ObservedAt: now.Add(-3 * time.Second), Reference: "bootstrap:ready"},
+		{Runner: runner, State: lifecycle.ProcessUnknown, ObservedAt: now.Add(-2 * time.Second), Reference: "bootstrap:unknown"},
+		{Runner: runner, State: lifecycle.ProcessExited, ObservedAt: now.Add(-time.Second), Reference: "bootstrap:exit"},
+	} {
+		if err := ledger.ObserveProcess(ctx, lease, "build", binding, observation, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := readTestExecutor(t, ledger, lease, "build", binding)
+	if got.Conflicted || got.Resource.State != lifecycle.ResourceTerminal || got.Process.State != lifecycle.ProcessExited ||
+		!got.ResourceLiveAt.Equal(now.Add(-3*time.Second)) || !got.ProcessLiveAt.Equal(now.Add(-3*time.Second)) {
+		t.Fatalf("ordered terminal evidence was rejected: %+v", got)
 	}
 }

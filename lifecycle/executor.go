@@ -27,13 +27,15 @@ type RunnerIdentity struct {
 // Executor stores verified identities and job observations. A completed job
 // alone provides no evidence that the executor can be stopped.
 type Executor struct {
-	Binding    ExecutorBinding     `json:"binding"`
-	Runner     RunnerIdentity      `json:"runner,omitzero"`
-	Attempt    JobFact             `json:"attempt,omitzero"`
-	Resource   ResourceObservation `json:"resource,omitzero"`
-	Process    ProcessObservation  `json:"process,omitzero"`
-	Conflicted bool                `json:"conflicted,omitempty"`
-	revision   int64
+	Binding        ExecutorBinding     `json:"binding"`
+	Runner         RunnerIdentity      `json:"runner,omitzero"`
+	Attempt        JobFact             `json:"attempt,omitzero"`
+	Resource       ResourceObservation `json:"resource,omitzero"`
+	Process        ProcessObservation  `json:"process,omitzero"`
+	ResourceLiveAt time.Time           `json:"resourceLiveAt,omitzero"`
+	ProcessLiveAt  time.Time           `json:"processLiveAt,omitzero"`
+	Conflicted     bool                `json:"conflicted,omitempty"`
+	revision       int64
 }
 
 func (b ExecutorBinding) valid() bool {

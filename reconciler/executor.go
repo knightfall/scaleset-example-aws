@@ -18,7 +18,7 @@ func ClassifyExecutor(executor lifecycle.Executor, now time.Time, maxAge, exitGr
 		now.IsZero() || maxAge <= 0 || exitGrace <= 0 {
 		return result, errors.New("executor classification requires identity and valid observation timing")
 	}
-	if executor.Conflicted {
+	if executor.Conflicted || executor.ResourceLiveAt.After(now) || executor.ProcessLiveAt.After(now) {
 		return result, nil
 	}
 	resource := executor.Resource
@@ -26,6 +26,9 @@ func ClassifyExecutor(executor lifecycle.Executor, now time.Time, maxAge, exitGr
 		return result, nil
 	}
 	if resource.State == lifecycle.ResourceTerminal {
+		if !executor.ResourceLiveAt.IsZero() && !executor.ResourceLiveAt.Before(resource.ObservedAt) {
+			return result, nil
+		}
 		result.State = "lost"
 		return result, nil
 	}
@@ -57,6 +60,9 @@ func ClassifyExecutor(executor lifecycle.Executor, now time.Time, maxAge, exitGr
 		return result, nil
 	}
 	if job.RequestID > 0 && job.RunnerID == executor.Runner.ID && job.Phase == lifecycle.JobCompleted {
+		if !executor.ProcessLiveAt.IsZero() && !executor.ProcessLiveAt.Before(process.ObservedAt) {
+			return result, nil
+		}
 		// Exact runner identity links these terminal facts. Their timestamps come
 		// from different clocks, so grace uses the local process observation.
 		if process.State == lifecycle.ProcessExited && now.Sub(process.ObservedAt) >= exitGrace {
