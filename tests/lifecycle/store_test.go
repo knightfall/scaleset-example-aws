@@ -40,10 +40,43 @@ func (d *database) GetItem(_ context.Context, input *dynamodb.GetItemInput, _ ..
 }
 
 func (d *database) Query(_ context.Context, input *dynamodb.QueryInput, _ ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error) {
-	if d.query == nil {
-		return nil, errors.New("unexpected query")
+	if d.query != nil {
+		return d.query(input)
 	}
-	return d.query(input)
+	if aws.ToString(input.TableName) != "state" || !aws.ToBool(input.ConsistentRead) || input.IndexName != nil ||
+		aws.ToString(input.KeyConditionExpression) != "PK = :pk AND begins_with(SK, :prefix)" ||
+		stringValue(input.ExpressionAttributeValues[":prefix"]) != "OP#" || aws.ToInt32(input.Limit) != 100 {
+		return nil, errors.New("unexpected query outside the legacy effect migration")
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	partition := stringValue(input.ExpressionAttributeValues[":pk"])
+	var keys []lifecycle.Key
+	for key := range d.items {
+		if key.PK == partition && strings.HasPrefix(key.SK, "OP#") {
+			keys = append(keys, key)
+		}
+	}
+	slices.SortFunc(keys, func(a, b lifecycle.Key) int { return strings.Compare(a.SK, b.SK) })
+	page := &dynamodb.QueryOutput{}
+	var after string
+	if len(input.ExclusiveStartKey) != 0 {
+		after = keyOf(input.ExclusiveStartKey).SK
+	}
+	for _, key := range keys {
+		if key.SK <= after {
+			continue
+		}
+		if len(page.Items) == int(aws.ToInt32(input.Limit)) {
+			break
+		}
+		page.Items = append(page.Items, d.items[key])
+		page.LastEvaluatedKey = keyAttributes(key)
+	}
+	if len(page.Items) < int(aws.ToInt32(input.Limit)) {
+		page.LastEvaluatedKey = nil
+	}
+	return page, nil
 }
 
 func (d *database) TransactWriteItems(_ context.Context, input *dynamodb.TransactWriteItemsInput, _ ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {

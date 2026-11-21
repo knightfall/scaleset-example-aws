@@ -153,6 +153,9 @@ func TestRecoveringLeaseCanCancelAnExpiredPlannedEffect(t *testing.T) {
 	key := lifecycle.ProfileKey("dev", profile, "OP#"+intent.ID)
 	// Simulate a stale GSI projection even after the base record is unscheduled.
 	db.query = func(input *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+		if input.IndexName == nil {
+			return &dynamodb.QueryOutput{Items: []attributes{db.items[key]}}, nil
+		}
 		return &dynamodb.QueryOutput{Items: []attributes{keyAttributes(key)}}, nil
 	}
 	due, err := ledger.Due(t.Context(), "dev", now, 1)

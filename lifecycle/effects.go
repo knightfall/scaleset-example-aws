@@ -9,10 +9,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
-	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 const (
@@ -66,7 +62,7 @@ func (s *Store) PlanEffect(ctx context.Context, lease Lease, profile string, eff
 	}
 	effect.RequestSHA256 = hex.EncodeToString(digest)
 	effect.State, effect.Epoch, effect.Revision, effect.Evidence = EffectPlanned, lease.Epoch, 0, ""
-	written, err := s.saveEffect(ctx, lease, profile, effect, now)
+	written, err := s.saveEffect(ctx, lease, profile, effect, now, 1)
 	if !errors.Is(err, ErrConflict) {
 		return written, err
 	}
@@ -78,6 +74,7 @@ func (s *Store) PlanEffect(ctx context.Context, lease Lease, profile string, eff
 		existing.RequestSHA256 != effect.RequestSHA256 {
 		return Effect{}, ErrConflict
 	}
+	countDelta := 0
 	sameAttempt := existing.Deadline.Equal(effect.Deadline) && existing.Epoch == lease.Epoch
 	switch existing.State {
 	case EffectPlanned:
@@ -85,13 +82,14 @@ func (s *Store) PlanEffect(ctx context.Context, lease Lease, profile string, eff
 			return *existing, nil
 		}
 	case EffectCancelled:
+		countDelta = 1
 	default:
 		return *existing, nil
 	}
 	// An intent that never crossed the dispatch boundary can acquire a fresh
 	// attempt deadline. The revision check excludes an overlapping dispatch.
 	effect.Revision = existing.Revision
-	return s.saveEffect(ctx, lease, profile, effect, now)
+	return s.saveEffect(ctx, lease, profile, effect, now, countDelta)
 }
 
 // CancelPlannedEffect settles an intent that never started. The revision
@@ -120,7 +118,7 @@ func (s *Store) BeginEffect(ctx context.Context, lease Lease, profile, id string
 		return Effect{}, ErrEffectNotReady
 	}
 	effect.State, effect.Epoch = EffectExecuting, lease.Epoch
-	return s.saveEffect(ctx, lease, profile, *effect, now)
+	return s.saveEffect(ctx, lease, profile, *effect, now, 0)
 }
 
 func (s *Store) MarkEffectUncertain(ctx context.Context, lease Lease, profile, id string, now time.Time) (Effect, error) {
@@ -132,7 +130,7 @@ func (s *Store) MarkEffectUncertain(ctx context.Context, lease Lease, profile, i
 		return Effect{}, ErrEffectNotReady
 	}
 	effect.State = EffectUncertain
-	return s.saveEffect(ctx, lease, profile, *effect, now)
+	return s.saveEffect(ctx, lease, profile, *effect, now, 0)
 }
 
 // ResolveEffect records provider evidence. A recovering lease can record an
@@ -165,14 +163,21 @@ func (s *Store) settleEffect(ctx context.Context, lease Lease, profile string, e
 	if err != nil {
 		return Effect{}, err
 	}
-	if err := s.applyOwned(ctx, lease, now, "", change); err != nil {
+	counter, err := s.changeEffectCount(ctx, lease, profile, -1)
+	if err != nil {
+		return Effect{}, err
+	}
+	if err := s.applyOwned(ctx, lease, now, "", change, counter); err != nil {
 		return Effect{}, err
 	}
 	effect.Revision++
 	return effect, nil
 }
 
-func (s *Store) saveEffect(ctx context.Context, lease Lease, profile string, effect Effect, now time.Time) (Effect, error) {
+func (s *Store) saveEffect(ctx context.Context, lease Lease, profile string, effect Effect, now time.Time, countDelta int) (Effect, error) {
+	if lease.Phase != LeaseActive {
+		return Effect{}, ErrRecoveryRequired
+	}
 	due := effect.Deadline
 	if effect.State == EffectPlanned {
 		due = now
@@ -181,7 +186,15 @@ func (s *Store) saveEffect(ctx context.Context, lease Lease, profile string, eff
 	if err != nil {
 		return Effect{}, err
 	}
-	if err := s.ApplyFenced(ctx, lease, now, "", change); err != nil {
+	changes := []Change{change}
+	if countDelta != 0 {
+		counter, err := s.changeEffectCount(ctx, lease, profile, countDelta)
+		if err != nil {
+			return Effect{}, err
+		}
+		changes = append(changes, counter)
+	}
+	if err := s.ApplyFenced(ctx, lease, now, "", changes...); err != nil {
 		return Effect{}, err
 	}
 	effect.Revision++
@@ -199,58 +212,4 @@ func (e Effect) change(deployment, profile string, due time.Time) (Change, error
 		},
 		ExpectedRevision: e.Revision,
 	}, nil
-}
-
-// ProfileEffectsSettled checks every effect for this profile on the base table.
-// The due index can omit a recent write or an intent whose deadline has not arrived.
-func (s *Store) ProfileEffectsSettled(ctx context.Context, deployment, profile string) (bool, error) {
-	if deployment == "" || profile == "" {
-		return false, errors.New("effect inspection requires deployment and profile")
-	}
-	pk := ProfileKey(deployment, profile, "").PK
-	input := &dynamodb.QueryInput{
-		TableName: aws.String(s.table), ConsistentRead: aws.Bool(true), Limit: aws.Int32(100),
-		KeyConditionExpression: aws.String("PK = :pk AND begins_with(SK, :prefix)"),
-		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":pk": text(pk), ":prefix": text("OP#"),
-		},
-	}
-	for {
-		page, err := s.db.Query(ctx, input)
-		if err != nil {
-			return false, fmt.Errorf("read profile effects: %w", err)
-		}
-		for _, item := range page.Items {
-			settled, err := settledEffect(item, deployment, pk)
-			if err != nil || !settled {
-				return false, err
-			}
-		}
-		if len(page.LastEvaluatedKey) == 0 {
-			return true, nil
-		}
-		input.ExclusiveStartKey = page.LastEvaluatedKey
-	}
-}
-
-func settledEffect(item map[string]types.AttributeValue, deployment, partition string) (bool, error) {
-	record, err := readRecord(item)
-	if err != nil {
-		return false, err
-	}
-	var effect Effect
-	if record.Deployment != deployment || record.Key.PK != partition ||
-		json.Unmarshal(record.Payload, &effect) != nil || effect.ID == "" || record.Key.SK != "OP#"+effect.ID {
-		return false, errors.New("invalid durable profile effect")
-	}
-	switch effect.State {
-	case EffectCancelled:
-		return true, nil
-	case EffectConfirmed, EffectAbandoned:
-		return effect.Evidence != "", nil
-	case EffectPlanned, EffectExecuting, EffectUncertain:
-		return false, nil
-	default:
-		return false, errors.New("invalid durable effect state")
-	}
 }
