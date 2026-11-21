@@ -237,23 +237,31 @@ func TestGitHubLookupDistinguishesMissingAndDrift(t *testing.T) {
 	const scope = "https://github.com/enterprises/corp"
 	cfg := credentialArtifact("enterprise-pat", scope)
 	for _, tt := range []struct {
-		name     string
-		response string
-		want     error
+		name      string
+		response  string
+		want      error
+		creatable bool
 	}{
-		{"missing", `{"count":0,"value":[]}`, githubsets.ErrScaleSetMissing},
-		{"extra label", strings.Replace(matchingSetResponse, `{"name":"Docker-Linux"}`, `{"name":"Docker-Linux"},{"name":"extra"}`, 1), githubsets.ErrRegistrationDrift},
-		{"unexpected pinned ID", strings.Replace(matchingSetResponse, `"id":7`, `"id":8`, 1), githubsets.ErrRegistrationDrift},
-		{"different group", strings.Replace(matchingSetResponse, `"runnerGroupId":19`, `"runnerGroupId":20`, 1), githubsets.ErrRegistrationDrift},
+		{"missing", `{"count":0,"value":[]}`, githubsets.ErrScaleSetMissing, false},
+		{"creatable missing", `{"count":0,"value":[]}`, nil, true},
+		{"extra label", strings.Replace(matchingSetResponse, `{"name":"Docker-Linux"}`, `{"name":"Docker-Linux"},{"name":"extra"}`, 1), githubsets.ErrRegistrationDrift, false},
+		{"unexpected pinned ID", strings.Replace(matchingSetResponse, `"id":7`, `"id":8`, 1), githubsets.ErrRegistrationDrift, false},
+		{"different group", strings.Replace(matchingSetResponse, `"runnerGroupId":19`, `"runnerGroupId":20`, 1), githubsets.ErrRegistrationDrift, false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			config := cfg
+			config.Config.Spec.Profiles = append([]runtimeconfig.Profile(nil), cfg.Config.Spec.Profiles...)
+			if tt.creatable {
+				config.Config.Spec.Profiles[0].GitHub.ScaleSetID = 0
+				config.Config.Spec.Profiles[0].GitHub.Registration = "create-if-missing"
+			}
 			github := newScript(t,
 				registrationExchange(t, "api.github.com", "/enterprises/corp/actions/runners/registration-token", "Bearer fixture-pat"),
 				adminExchange(t, "api.github.com", "/actions/runner-registration", scope),
 				groupLookup(t), setLookup(t, tt.response),
 			)
 			loader := credentialLoader(newScript(t, secretExchange(t, "v1", `{"token":"fixture-pat"}`)), github)
-			connection, err := loader.Load(t.Context(), cfg, "build")
+			connection, err := loader.Load(t.Context(), config, "build")
 			if err != nil {
 				t.Fatal(err)
 			}

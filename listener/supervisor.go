@@ -28,7 +28,7 @@ type Timing struct {
 func DefaultTiming() Timing {
 	return Timing{
 		LeaseTTL: 5 * time.Minute, OperationTimeout: 30 * time.Second, PollTimeout: 150 * time.Second,
-		CredentialInterval: 5 * time.Minute, MaxDemandAge: 10 * time.Minute, ShutdownTimeout: 30 * time.Second,
+		CredentialInterval: 5 * time.Minute, MaxDemandAge: 10 * time.Minute, ShutdownTimeout: time.Minute,
 	}
 }
 
@@ -121,9 +121,15 @@ func (s Supervisor) Run(ctx context.Context, artifact runtimeconfig.Artifact, le
 
 func (s Supervisor) renewLease(ctx context.Context, held *atomic.Pointer[lifecycle.Lease]) error {
 	interval := s.Timing.LeaseTTL / 3
+	var retryAt time.Time
+	failures := 0
 	for {
 		lease := held.Load()
-		if !waitUntil(ctx, lease.ValidUntil.Add(-2*interval)) {
+		nextAttempt := lease.ValidUntil.Add(-2 * interval)
+		if retryAt.After(nextAttempt) {
+			nextAttempt = retryAt
+		}
+		if !waitUntil(ctx, nextAttempt) {
 			return nil
 		}
 		request, cancel := boundedContext(ctx, lease.ValidUntil, s.Timing.OperationTimeout)
@@ -133,9 +139,19 @@ func (s Supervisor) renewLease(ctx context.Context, held *atomic.Pointer[lifecyc
 			if ctx.Err() != nil {
 				return nil
 			}
-			return fmt.Errorf("renew deployment lease: %w", err)
+			if errors.Is(err, lifecycle.ErrLeaseLost) || !lease.ValidUntil.After(time.Now()) {
+				return fmt.Errorf("renew deployment lease: %w", err)
+			}
+			retryAt = time.Now().Add(retryDelay(failures))
+			if retryAt.After(lease.ValidUntil) {
+				retryAt = lease.ValidUntil
+			}
+			failures = min(failures+1, 8)
+			continue
 		}
 		held.Store(&next)
+		retryAt = time.Time{}
+		failures = 0
 	}
 }
 

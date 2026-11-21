@@ -18,6 +18,7 @@ var (
 	ErrUnauthorized = errors.New("GitHub rejected the configured credential or its permissions")
 	ErrRequest      = errors.New("GitHub request failed")
 	ErrRateLimited  = errors.New("GitHub rate limited the request")
+	ErrNotFound     = errors.New("GitHub resource was not found")
 )
 
 type RateLimitError struct {
@@ -65,6 +66,9 @@ type githubTransport struct {
 }
 
 func (t githubTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if credentialRequest, ok := request.Context().Value(credentialRetryKey{}).(*atomic.Bool); ok {
+		credentialRequest.Store(false)
+	}
 	if request.URL.Scheme != "https" || request.URL.User != nil {
 		return nil, errors.New("GitHub requests require HTTPS without URL credentials")
 	}
@@ -129,6 +133,8 @@ func requestError(operation string, err error, credentialKey [32]byte) error {
 		reason = &RateLimitError{RetryAfter: limit.RetryAfter, Reset: limit.Reset, CredentialKey: credentialKey}
 	case status == http.StatusUnauthorized || status == http.StatusForbidden || errors.Is(err, scaleset.UnauthorizedError):
 		reason = ErrUnauthorized
+	case status == http.StatusNotFound || errors.Is(err, scaleset.NotFoundError):
+		reason = ErrNotFound
 	case errors.Is(err, context.Canceled):
 		reason = context.Canceled
 	case errors.Is(err, context.DeadlineExceeded):

@@ -54,6 +54,9 @@ type CreateRequest struct {
 func (c *Connection) Validate(ctx context.Context) error {
 	for _, profile := range c.profiles {
 		if _, err := c.lookup(ctx, profile.GitHub); err != nil {
+			if errors.Is(err, ErrScaleSetMissing) && profile.GitHub.Registration == "create-if-missing" && profile.GitHub.ScaleSetID == 0 {
+				continue
+			}
 			return fmt.Errorf("verify GitHub profile %s: %w", profile.ID, err)
 		}
 	}
