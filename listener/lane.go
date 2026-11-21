@@ -166,23 +166,20 @@ func (l *profileLane) open(ctx context.Context, lease lifecycle.Lease, connectio
 	if err != nil {
 		return nil, err
 	}
-	if effect != nil && effect.State != lifecycle.EffectConfirmed {
-		if effect.State != lifecycle.EffectExecuting && effect.State != lifecycle.EffectUncertain {
-			return nil, lifecycle.ErrRecoveryRequired
-		}
-		set, err := connection.VerifyCreationReadback(ctx, l.profile.ID, *effect)
-		if err != nil {
-			return nil, errors.Join(lifecycle.ErrRecoveryRequired, err)
-		}
-		if _, err := store.ResolveEffect(ctx, lease, l.profile.ID, effect.ID, time.Now(), true, fmt.Sprintf("scale-set:%d", set.ID)); err != nil {
+	mayCreate := true
+	if effect != nil {
+		if err := l.reconcileCreation(ctx, lease, connection, *effect); err != nil {
 			return nil, err
 		}
+		mayCreate = effect.State == lifecycle.EffectPlanned || effect.State == lifecycle.EffectCancelled
 	}
 
 	session, err := connection.OpenOwnedSession(ctx, store, lease, l.profile.ID)
-	if !errors.Is(err, githubsets.ErrScaleSetMissing) || effect != nil || capacity == nil ||
-		l.profile.State != "active" || l.profile.GitHub.Registration != "create-if-missing" || l.profile.GitHub.ScaleSetID != 0 {
+	if !errors.Is(err, githubsets.ErrScaleSetMissing) || !mayCreate || capacity == nil {
 		return session, err
+	}
+	if l.profile.State != "active" || l.profile.GitHub.Registration != "create-if-missing" || l.profile.GitHub.ScaleSetID != 0 {
+		return nil, err
 	}
 	if _, err := connection.Create(ctx, store, githubsets.CreateRequest{
 		ProfileID: l.profile.ID, EffectID: creationEffectID, Lease: lease,
@@ -190,6 +187,32 @@ func (l *profileLane) open(ctx context.Context, lease lifecycle.Lease, connectio
 		return nil, err
 	}
 	return connection.OpenOwnedSession(ctx, store, lease, l.profile.ID)
+}
+
+func (l *profileLane) reconcileCreation(ctx context.Context, lease lifecycle.Lease, connection *githubsets.Connection, effect lifecycle.Effect) error {
+	store := l.supervisor.Store
+	switch effect.State {
+	case lifecycle.EffectConfirmed, lifecycle.EffectCancelled:
+		return nil
+	case lifecycle.EffectPlanned:
+		cancelled, err := store.CancelPlannedEffect(ctx, lease, l.profile.ID, effect.ID, time.Now())
+		if err != nil {
+			return err
+		}
+		if !cancelled {
+			return lifecycle.ErrRecoveryRequired
+		}
+		return nil
+	case lifecycle.EffectExecuting, lifecycle.EffectUncertain:
+		set, err := connection.VerifyCreationReadback(ctx, l.profile.ID, effect)
+		if err != nil {
+			return errors.Join(lifecycle.ErrRecoveryRequired, err)
+		}
+		_, err = store.ResolveEffect(ctx, lease, l.profile.ID, effect.ID, time.Now(), true, fmt.Sprintf("scale-set:%d", set.ID))
+		return err
+	default:
+		return lifecycle.ErrRecoveryRequired
+	}
 }
 
 func (l *profileLane) capacity(ctx context.Context, lease lifecycle.Lease) *Capacity {

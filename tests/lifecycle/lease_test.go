@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/knightfall/scaleset-example-aws/lifecycle"
 )
 
@@ -126,5 +127,48 @@ func TestUncertainEffectRequiresReadbackBeforeResolution(t *testing.T) {
 	resolved, err := ledger.ResolveEffect(t.Context(), lease, "linux", intent.ID, intent.Deadline, false, "confirmed-absent")
 	if err != nil || resolved.State != lifecycle.EffectAbandoned {
 		t.Fatalf("expected resolved absence: %+v, %v", resolved, err)
+	}
+}
+
+func TestRecoveringLeaseCanCancelAnExpiredPlannedEffect(t *testing.T) {
+	ledger, db := store(t)
+	now := time.Unix(1700000000, 0)
+	old, err := ledger.AcquireLease(t.Context(), "dev", "old", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const profile = "linux"
+	intent := lifecycle.Effect{
+		ID: "scale-1", Kind: "run-task", Target: "runner",
+		RequestSHA256: strings.Repeat("ab", 32), Deadline: now.Add(30 * time.Second),
+	}
+	if _, err := ledger.PlanEffect(t.Context(), old, profile, intent, now); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute + time.Second)
+	recovering, err := ledger.AcquireLease(t.Context(), "dev", "new", now, time.Minute)
+	if err != nil || recovering.Phase != lifecycle.LeaseRecovering {
+		t.Fatalf("recovering lease = %+v, error = %v", recovering, err)
+	}
+	key := lifecycle.ProfileKey("dev", profile, "OP#"+intent.ID)
+	// Simulate a stale GSI projection even after the base record is unscheduled.
+	db.query = func(input *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
+		return &dynamodb.QueryOutput{Items: []attributes{keyAttributes(key)}}, nil
+	}
+	due, err := ledger.Due(t.Context(), "dev", now, 1)
+	if err != nil || len(due) != 1 || due[0].Key != key {
+		t.Fatalf("due before cancellation = %+v, error = %v", due, err)
+	}
+	cancelled, err := ledger.CancelPlannedEffect(t.Context(), recovering, profile, intent.ID, now)
+	if err != nil || !cancelled {
+		t.Fatalf("cancelled = %t, error = %v", cancelled, err)
+	}
+	due, err = ledger.Due(t.Context(), "dev", now, 1)
+	if err != nil || len(due) != 0 {
+		t.Fatalf("cancelled intent still due: %+v, error = %v", due, err)
+	}
+	intent.Deadline = now.Add(30 * time.Second)
+	if _, err := ledger.PlanEffect(t.Context(), recovering, profile, intent, now); !errors.Is(err, lifecycle.ErrRecoveryRequired) {
+		t.Fatalf("recovering owner replanned effect: %v", err)
 	}
 }

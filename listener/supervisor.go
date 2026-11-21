@@ -138,6 +138,9 @@ func (s Supervisor) releaseWhenSettled(ctx context.Context, profiles []runtimeco
 		if owner.Phase != "" && owner.Phase != lifecycle.SessionClosed {
 			return fmt.Errorf("profile %s: %w", profile.ID, lifecycle.ErrSessionRecoveryRequired)
 		}
+		if _, err := s.Store.CancelPlannedEffect(ctx, lease, profile.ID, creationEffectID, time.Now()); err != nil {
+			return err
+		}
 		settled, err := s.Store.ProfileEffectsSettled(ctx, lease.Deployment, profile.ID)
 		if err != nil {
 			return err
