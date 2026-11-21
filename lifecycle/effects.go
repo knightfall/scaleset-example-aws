@@ -78,15 +78,23 @@ func (s *Store) PlanEffect(ctx context.Context, lease Lease, profile string, eff
 		existing.RequestSHA256 != effect.RequestSHA256 {
 		return Effect{}, ErrConflict
 	}
-	if existing.State == EffectCancelled {
-		// A cancelled intent never reached executing and can be planned again.
-		effect.Revision = existing.Revision
-		return s.saveEffect(ctx, lease, profile, effect, now)
+	sameAttempt := existing.Deadline.Equal(effect.Deadline) && existing.Epoch == lease.Epoch
+	switch existing.State {
+	case EffectPlanned:
+		if sameAttempt {
+			return *existing, nil
+		}
+	case EffectCancelled:
+	default:
+		if !existing.Deadline.Equal(effect.Deadline) {
+			return Effect{}, ErrConflict
+		}
+		return *existing, nil
 	}
-	if !existing.Deadline.Equal(effect.Deadline) {
-		return Effect{}, ErrConflict
-	}
-	return *existing, nil
+	// An intent that never crossed the dispatch boundary can acquire a fresh
+	// attempt deadline. The revision check excludes an overlapping dispatch.
+	effect.Revision = existing.Revision
+	return s.saveEffect(ctx, lease, profile, effect, now)
 }
 
 // CancelPlannedEffect settles an intent that never started. The revision
