@@ -18,7 +18,7 @@ func ClassifyExecutor(executor lifecycle.Executor, now time.Time, maxAge, exitGr
 		now.IsZero() || maxAge <= 0 || exitGrace <= 0 {
 		return result, errors.New("executor classification requires identity and valid observation timing")
 	}
-	if executor.Conflicted || executor.ResourceLiveAt.After(now) || executor.ProcessLiveAt.After(now) {
+	if executor.Conflicted || executor.ConflictReference != "" || executor.ResourceLiveAt.After(now) || executor.ProcessLiveAt.After(now) {
 		return result, nil
 	}
 	resource := executor.Resource
