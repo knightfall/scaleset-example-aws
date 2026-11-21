@@ -16,6 +16,22 @@
     "runtimeError": "incompatible with the scope"
   },
   {
+    "name": "bare GitHub scope query",
+    "fixture": "asg-only-external",
+    "path": "spec.github.engineering.scopeURL",
+    "value": "https://github.com/example-engineering?",
+    "yamlError": "canonical HTTPS scope URL",
+    "runtimeError": "canonical HTTPS scope URL"
+  },
+  {
+    "name": "bare GitHub scope fragment",
+    "fixture": "asg-only-external",
+    "path": "spec.github.engineering.scopeURL",
+    "value": "https://github.com/example-engineering#",
+    "yamlError": "canonical HTTPS scope URL",
+    "runtimeError": "canonical HTTPS scope URL"
+  },
+  {
     "name": "invalid controller Fargate memory",
     "fixture": "fargate-only-import",
     "path": "spec.controller.hosting.memoryMiB",

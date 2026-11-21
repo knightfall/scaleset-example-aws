@@ -2,6 +2,7 @@
 package dryrun
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,9 +11,11 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/knightfall/scaleset-example-aws/planner"
 	"github.com/knightfall/scaleset-example-aws/runtimeconfig"
+	"github.com/knightfall/scaleset-example-aws/strictjson"
 )
 
 const MaxObservationAge = 10 * time.Minute
@@ -126,27 +129,32 @@ func readObservations(
 	if err != nil {
 		return nil, asOf, err
 	}
-	replay := input == "replay"
-	if replay {
-		slices.SortStableFunc(document.Records, func(a, b Record) int {
-			return a.ObservedAt.Compare(b.ObservedAt)
-		})
-		asOf = document.Records[len(document.Records)-1].ObservedAt.UTC()
-	}
-
 	profiles := make(map[string]runtimeconfig.Profile, len(config.Spec.Profiles))
 	for _, profile := range config.Spec.Profiles {
 		profiles[profile.ID] = profile
 	}
-	state := make(map[string]observations)
+	records := document.Records[:0]
 	for _, record := range document.Records {
 		profile, ok := profiles[record.ProfileID]
 		if !ok {
 			return nil, asOf, fmt.Errorf("demand source references unknown profile %s", record.ProfileID)
 		}
-		if profile.State == "disabled" {
-			continue
+		if profile.State != "disabled" {
+			records = append(records, record)
 		}
+	}
+
+	replay := input == "replay"
+	if replay && len(records) > 0 {
+		slices.SortStableFunc(records, func(a, b Record) int {
+			return a.ObservedAt.Compare(b.ObservedAt)
+		})
+		asOf = records[len(records)-1].ObservedAt.UTC()
+	}
+
+	state := make(map[string]observations)
+	for _, record := range records {
+		profile := profiles[record.ProfileID]
 		connection := config.Spec.GitHub[profile.GitHub.Connection]
 		if err := record.verify(profile, connection); err != nil {
 			return nil, asOf, fmt.Errorf("profile %s: %w", profile.ID, err)
@@ -176,13 +184,25 @@ func limits(profile runtimeconfig.Profile) planner.Limits {
 
 func readSource(r io.Reader, source, environment string) (DemandFile, error) {
 	var document DemandFile
-	decoder := json.NewDecoder(r)
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return document, fmt.Errorf("read demand source: %w", err)
+	}
+	if !utf8.Valid(data) {
+		return document, errors.New("demand source must use UTF-8")
+	}
+	input := json.NewDecoder(bytes.NewReader(data))
+	input.UseNumber()
+	if _, err := strictjson.ReadValue(input); err != nil {
+		return document, fmt.Errorf("invalid demand source at byte %d: %w", input.InputOffset(), err)
+	}
+	if _, err := input.Token(); !errors.Is(err, io.EOF) {
+		return document, errors.New("expected one demand source document")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&document); err != nil {
 		return document, fmt.Errorf("invalid demand source: %w", err)
-	}
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		return document, errors.New("expected one demand source document")
 	}
 	var expectedKind string
 	switch source {
@@ -200,7 +220,13 @@ func readSource(r io.Reader, source, environment string) (DemandFile, error) {
 
 func (r Record) verify(profile runtimeconfig.Profile, connection runtimeconfig.GitHubConnection) error {
 	binding := profile.GitHub
-	if !strings.EqualFold(strings.TrimSuffix(r.ScopeURL, "/"), strings.TrimSuffix(connection.ScopeURL, "/")) ||
+	configuredScope, err := connection.CanonicalScope()
+	if err != nil {
+		return err
+	}
+	connection.ScopeURL = r.ScopeURL
+	recordedScope, err := connection.CanonicalScope()
+	if err != nil || recordedScope != configuredScope ||
 		!strings.EqualFold(r.RunnerGroup, binding.RunnerGroup) ||
 		!strings.EqualFold(r.ScaleSet, binding.ScaleSet) ||
 		(binding.ScaleSetID != 0 && r.ScaleSetID != binding.ScaleSetID) || r.ScaleSetID < 0 {
