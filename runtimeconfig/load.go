@@ -96,5 +96,24 @@ func (d *Decoder) Decode(data []byte, expectedSHA256 string) (Artifact, error) {
 			artifact.Config.Spec.Profiles[i].GitHub.Registration = "existing"
 		}
 	}
+	artifact.decodedDigest, err = artifact.Digest()
+	if err != nil {
+		return Artifact{}, err
+	}
+	artifact.sourceDigest = fmt.Sprintf("%x", sha256.Sum256(data))
 	return artifact, nil
+}
+
+// Digest returns the validated source digest while the decoded artifact is
+// unchanged. Constructed or modified artifacts use their current serialization.
+func (a Artifact) Digest() (string, error) {
+	payload, err := json.Marshal(a)
+	if err != nil {
+		return "", fmt.Errorf("encode runtime configuration: %w", err)
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(payload))
+	if a.sourceDigest != "" && digest == a.decodedDigest {
+		return a.sourceDigest, nil
+	}
+	return digest, nil
 }

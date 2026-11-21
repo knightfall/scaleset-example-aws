@@ -228,6 +228,19 @@ function checkGitHubProfiles(spec: EnvironmentConfig["spec"]) {
     );
     checkAwsArn(connection.auth.secretArn, spec.aws, "GitHub secret ARN");
     const scope = scopeByConnection.get(github.connection);
+    const path = new URL(connection.scopeURL).pathname
+      .toLowerCase()
+      .split("/")
+      .filter(Boolean);
+    if (
+      path.length === 2 &&
+      path[0] !== "enterprises" &&
+      github.runnerGroup.toLowerCase() !== "default"
+    ) {
+      throw new Error(
+        `Profile ${profile.id} repository scope requires the default runner group`,
+      );
+    }
     unique(
       scaleSetOwners,
       JSON.stringify([

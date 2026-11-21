@@ -20,6 +20,17 @@ const fargate = join(fixtures, "fargate-only-import.yaml");
 const mixed = join(fixtures, "mixed-ecs-host.yaml");
 const base = readFileSync(asg, "utf8");
 
+test("repository scopes accept the default runner group", () => {
+  const source = base
+    .replace(
+      "https://github.com/example-engineering",
+      "https://github.com/example-engineering/repository",
+    )
+    .replace("runnerGroup: Linux-Docker", "runnerGroup: DEFAULT");
+  const { runtime } = compileEnvironmentConfig(source);
+  assert.equal(runtime.config.spec.profiles[0].github.runnerGroup, "DEFAULT");
+});
+
 test("the authored fixtures produce the shared runtime fixtures", () => {
   for (const name of [
     "asg-only-external",

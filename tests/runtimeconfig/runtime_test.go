@@ -76,6 +76,15 @@ func TestLoadSharedRuntimeConfigurations(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			digest, err := got.Digest()
+			if err != nil || digest != sum(data) {
+				t.Fatalf("source digest = %q, error = %v", digest, err)
+			}
+			got.Config.Metadata.Name += "-changed"
+			changedDigest, err := got.Digest()
+			if err != nil || changedDigest == digest {
+				t.Fatalf("changed artifact retained source digest: %q, %v", changedDigest, err)
+			}
 			if got.Config.Spec.Controller.Hosting.Type != tc.host ||
 				got.Config.Spec.Mode != "dry-run" || got.Config.Spec.DryRun.Demand.Type != "none" ||
 				got.Resources.TrackingTableName != tc.table || len(got.Resources.ECSClusterARNs) != tc.clusters ||
@@ -119,6 +128,14 @@ func TestRuntimeRejectsPinnedCreateIfMissing(t *testing.T) {
 		`"registration": "create-if-missing", "scaleSetId": 37`)
 	if _, err := decoder(t).Decode(data, ""); err == nil || !strings.Contains(err.Error(), "v1alpha1 schema") {
 		t.Fatalf("pinned create-if-missing returned %v", err)
+	}
+}
+
+func TestRepositoryScopeAcceptsTheDefaultGroup(t *testing.T) {
+	data := replace(t, fixture(t, "asg-only-external"), "https://github.com/example-engineering", "https://github.com/example-engineering/repository")
+	data = replace(t, data, `"runnerGroup": "Linux-Docker"`, `"runnerGroup": "DEFAULT"`)
+	if _, err := decoder(t).Decode(data, ""); err != nil {
+		t.Fatal(err)
 	}
 }
 

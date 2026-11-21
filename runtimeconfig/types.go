@@ -3,10 +3,12 @@ package runtimeconfig
 
 // Artifact is the versioned runtime document produced by the CDK config compiler.
 type Artifact struct {
-	APIVersion string      `json:"apiVersion"`
-	Kind       string      `json:"kind"`
-	Config     Environment `json:"config"`
-	Resources  Resources   `json:"resources"`
+	APIVersion    string      `json:"apiVersion"`
+	Kind          string      `json:"kind"`
+	Config        Environment `json:"config"`
+	Resources     Resources   `json:"resources"`
+	sourceDigest  string
+	decodedDigest string
 }
 
 type Environment struct {
