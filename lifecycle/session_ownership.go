@@ -179,7 +179,14 @@ func (s *Store) BeginSessionClose(ctx context.Context, lease Lease, profile, own
 	if current.Phase == SessionClosed {
 		return current, nil
 	}
-	if current.Phase != SessionOpen {
+	switch current.Phase {
+	case SessionOpen:
+	case SessionClosing:
+		// Retry the exact owned DELETE only after the prior attempt window.
+		if current.Deadline.After(now) {
+			return SessionOwnership{}, ErrSessionRecoveryRequired
+		}
+	default:
 		return SessionOwnership{}, ErrSessionRecoveryRequired
 	}
 	current.Phase = SessionClosing
@@ -208,24 +215,41 @@ func (s *Store) ConfirmSessionClose(ctx context.Context, lease Lease, profile st
 	return s.recordSessionClosed(ctx, lease, profile, current, now, "github-delete-confirmed:"+current.SessionID)
 }
 
-// ReconcileSessionClosure records verified absence of exactly the prior
-// owner's session. For an ambiguous open, the evidence identifies its owner name.
+// ReconcileSessionClosure records verified absence of the exact remote session.
+// For an ambiguous open, the evidence identifies the owner name.
 func (s *Store) ReconcileSessionClosure(ctx context.Context, lease Lease, profile string, proof SessionClosureProof, now time.Time) error {
-	if lease.Phase != LeaseRecovering || proof.Reference == "" {
+	if proof.Reference == "" {
 		return ErrSessionRecoveryRequired
 	}
 	current, err := s.SessionOwnership(ctx, lease.Deployment, profile)
 	if err != nil {
 		return err
 	}
-	if current.Phase == "" || current.ControllerID != lease.PreviousOwner || current.OwnerName != proof.OwnerName ||
+	if current.Phase == "" || current.OwnerName != proof.OwnerName ||
 		current.Target != proof.Target || current.SessionID != proof.SessionID {
 		return ErrSessionRecoveryRequired
 	}
-	if current.Phase == SessionClosed && current.ProofRef == proof.Reference {
-		return nil
+	switch lease.Phase {
+	case LeaseActive:
+		if current.ControllerID != lease.Owner || current.Epoch != lease.Epoch || current.Phase == SessionOpen {
+			return ErrSessionRecoveryRequired
+		}
+	case LeaseRecovering:
+		// The session may have been left by an epoch older than the last
+		// controller. The exact target and owner name bind the closure proof.
+		if current.Epoch >= lease.Epoch {
+			return ErrSessionRecoveryRequired
+		}
+	default:
+		return ErrSessionRecoveryRequired
+	}
+	if current.Deadline.After(now) {
+		return ErrSessionRecoveryRequired
 	}
 	if current.Phase == SessionClosed {
+		if current.ProofRef == proof.Reference {
+			return nil
+		}
 		return ErrSessionChanged
 	}
 	return s.recordSessionClosed(ctx, lease, profile, current, now, proof.Reference)

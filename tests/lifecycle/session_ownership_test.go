@@ -114,3 +114,104 @@ func TestAmbiguousSessionOpenRequiresExactRecoveryEvidence(t *testing.T) {
 		t.Fatalf("generation after verified recovery = %+v, error = %v", next, err)
 	}
 }
+
+func TestActiveOwnerCanReconcileAmbiguousOpenWithExactEvidence(t *testing.T) {
+	ctx := t.Context()
+	ledger, _ := store(t)
+	now := time.Now()
+	lease, err := ledger.AcquireLease(ctx, "dev", "owner", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := lifecycle.SessionTarget{Scope: "https://github.com/example", ScaleSetID: 19}
+	deadline := now.Add(time.Second)
+	opening, err := ledger.BeginSessionOpen(ctx, lease, "build", target, now, deadline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := lifecycle.SessionClosureProof{Target: target, OwnerName: opening.OwnerName, Reference: "operator-audit-2"}
+	if err := ledger.ReconcileSessionClosure(ctx, lease, "build", proof, now); !errors.Is(err, lifecycle.ErrSessionRecoveryRequired) {
+		t.Fatalf("accepted proof before the attempt expired: %v", err)
+	}
+	if err := ledger.ReconcileSessionClosure(ctx, lease, "build", proof, deadline); err != nil {
+		t.Fatalf("exact evidence failed under the active lease: %v", err)
+	}
+	if _, err := ledger.BeginSessionOpen(ctx, lease, "build", target, deadline, deadline.Add(time.Second)); err != nil {
+		t.Fatalf("open stayed blocked after recovery: %v", err)
+	}
+}
+
+func TestRecoveryAcceptsExactEvidenceForAnOlderSessionEpoch(t *testing.T) {
+	ctx := t.Context()
+	ledger, _ := store(t)
+	now := time.Now()
+	first, err := ledger.AcquireLease(ctx, "dev", "first", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := lifecycle.SessionTarget{Scope: "https://github.com/example", ScaleSetID: 19}
+	opening, err := ledger.BeginSessionOpen(ctx, first, "build", target, now, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	second, err := ledger.AcquireLease(ctx, "dev", "second", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err = ledger.AuthorizeTakeover(ctx, second, now, lifecycle.TakeoverProof{
+		PreviousOwner: "first", Reference: "operator-fence-1", ProcessStopped: true, EffectsReconciled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	third, err := ledger.AcquireLease(ctx, "dev", "third", now, time.Minute)
+	if err != nil || third.PreviousOwner != second.Owner || third.Phase != lifecycle.LeaseRecovering {
+		t.Fatalf("third lease = %+v, error = %v", third, err)
+	}
+	proof := lifecycle.SessionClosureProof{Target: target, OwnerName: opening.OwnerName, Reference: "operator-audit-1"}
+	if err := ledger.ReconcileSessionClosure(ctx, third, "build", proof, now); err != nil {
+		t.Fatalf("exact session evidence rejected across epochs: %v", err)
+	}
+}
+
+func TestOwnedSessionCloseRetryRequiresExactIdentityAndExpiredWindow(t *testing.T) {
+	ctx := t.Context()
+	ledger, _ := store(t)
+	now := time.Now()
+	lease, err := ledger.AcquireLease(ctx, "dev", "owner", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := lifecycle.SessionTarget{Scope: "https://github.com/example", ScaleSetID: 19}
+	deadline := now.Add(time.Second)
+	opening, err := ledger.BeginSessionOpen(ctx, lease, "build", target, now, deadline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := ledger.ConfirmSessionOpen(ctx, lease, "build", opening, "remote-id", nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closing, err := ledger.BeginSessionClose(ctx, lease, "build", opened.OwnerName, opened.SessionID, now, deadline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.BeginSessionClose(ctx, lease, "build", opened.OwnerName, opened.SessionID, now, deadline); !errors.Is(err, lifecycle.ErrSessionRecoveryRequired) {
+		t.Fatalf("overlapping close retry: %v", err)
+	}
+	if _, err := ledger.BeginSessionClose(ctx, lease, "build", opened.OwnerName, "some-other-id", deadline, deadline.Add(time.Second)); !errors.Is(err, lifecycle.ErrSessionRecoveryRequired) {
+		t.Fatalf("wrong identity close retry: %v", err)
+	}
+	retry, err := ledger.BeginSessionClose(ctx, lease, "build", opened.OwnerName, opened.SessionID, deadline, deadline.Add(time.Second))
+	if err != nil || retry.SessionID != closing.SessionID || !retry.Deadline.After(closing.Deadline) {
+		t.Fatalf("retry intent = %+v, error = %v", retry, err)
+	}
+	if err := ledger.ConfirmSessionClose(ctx, lease, "build", closing, deadline); !errors.Is(err, lifecycle.ErrSessionChanged) {
+		t.Fatalf("stale close attestation: %v", err)
+	}
+	if err := ledger.ConfirmSessionClose(ctx, lease, "build", retry, deadline); err != nil {
+		t.Fatal(err)
+	}
+}
