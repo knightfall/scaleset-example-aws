@@ -410,6 +410,8 @@ Run schema, planner, mocked SDK and synth tests in ordinary CI. Run credentialed
 
 Each task defines a reviewable change and a check that can run before the next task depends on it. Task IDs identify dependencies. ASG and Fargate development can proceed independently after the shared lifecycle and bootstrap tasks. Run sandbox canaries against authorized disposable resources. Production cutover remains a separate approval.
 
+The [remaining task specifications](tasks/README.md) expand T10–T27 into individual review documents and capture unfinished integration and validation from the earlier foundation work.
+
 #### M1. Tooling, configuration and planner
 
 | Task | Depends on | Acceptance check |
