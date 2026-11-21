@@ -44,6 +44,10 @@ func (d *database) Query(_ context.Context, input *dynamodb.QueryInput, _ ...fun
 	if d.query != nil {
 		return d.query(input)
 	}
+	return d.queryEffectHistory(input)
+}
+
+func (d *database) queryEffectHistory(input *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
 	if aws.ToString(input.TableName) != "state" || !aws.ToBool(input.ConsistentRead) || input.IndexName != nil ||
 		aws.ToString(input.KeyConditionExpression) != "PK = :pk AND begins_with(SK, :prefix)" ||
 		stringValue(input.ExpressionAttributeValues[":prefix"]) != "OP#" || aws.ToInt32(input.Limit) != 32 {
