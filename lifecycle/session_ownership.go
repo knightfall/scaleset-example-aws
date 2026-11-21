@@ -275,8 +275,20 @@ func (s *Store) recordSessionClosed(ctx context.Context, lease Lease, profile st
 		if err != nil {
 			return err
 		}
-		if _, err := s.CancelUnstartedAdmission(ctx, lease, profile, now, pending.Receipt); err != nil {
+		cancelled, err := s.CancelUnstartedAdmission(ctx, lease, profile, now, pending.Receipt)
+		if err != nil {
 			return err
+		}
+		if !cancelled {
+			entry, _, err := s.readInbox(ctx, lease.Deployment, profile, pending.Receipt)
+			if err != nil {
+				return err
+			}
+			if entry.Admission != nil && !entry.Admission.OutcomeRecorded {
+				if err := s.RecordAdmissionOutcome(ctx, lease, profile, now, pending.Receipt, nil); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	changes := []Change{change}

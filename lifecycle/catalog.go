@@ -185,6 +185,9 @@ func (s *Store) applyProfileChanges(ctx context.Context, deployment string, next
 		if present && (existing.State == ProfileRetired || existing.BindingDigest != profile.BindingDigest) {
 			return fmt.Errorf("profile %s: %w", id, ErrProfileMigration)
 		}
+		if present && existing.State == profile.State {
+			continue
+		}
 		next.Profiles[id] = CatalogProfile{BindingDigest: profile.BindingDigest, State: profile.State}
 	}
 	return nil
@@ -200,6 +203,13 @@ func (s *Store) checkRetirement(ctx context.Context, deployment, profile string,
 		return err
 	}
 	if owner.Phase != "" && owner.Phase != SessionClosed {
+		return ErrProfileRetirement
+	}
+	progress, err := s.SessionProgress(ctx, deployment, profile)
+	if err != nil {
+		return err
+	}
+	if progress.HasPendingMessage() {
 		return ErrProfileRetirement
 	}
 	reserved, revision, err := s.readAdmissionCount(ctx, ProfileKey(deployment, profile, "ADMISSION"))

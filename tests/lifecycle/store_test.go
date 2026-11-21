@@ -285,7 +285,7 @@ func TestDueQueryVerifiesSparseIndexCandidatesAndFollowsPages(t *testing.T) {
 		case "ENV#dev#DUE#1":
 			if len(input.ExclusiveStartKey) == 0 {
 				return &dynamodb.QueryOutput{
-					Items: []attributes{keyAttributes(key("stale"))}, LastEvaluatedKey: keyAttributes(key("stale")),
+					Items: []attributes{keyAttributes(lifecycle.ProfileKey("dev", "linux", "ACQUIRE#1")), keyAttributes(key("stale"))}, LastEvaluatedKey: keyAttributes(key("stale")),
 				}, nil
 			}
 			return &dynamodb.QueryOutput{Items: []attributes{keyAttributes(key("later"))}}, nil

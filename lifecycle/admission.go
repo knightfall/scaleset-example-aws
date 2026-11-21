@@ -129,7 +129,6 @@ func (s *Store) ReserveAdmission(ctx context.Context, lease Lease, profile strin
 		if err != nil {
 			return AdmissionDecision{}, err
 		}
-		change.Record.DueAt = now
 		changes = append(changes, change)
 	}
 	if err := s.ApplyFenced(ctx, lease, now, "", changes...); err != nil {
@@ -304,7 +303,6 @@ func (s *Store) RecordAdmissionOutcome(ctx context.Context, lease Lease, profile
 		if err != nil {
 			return err
 		}
-		change.Record.DueAt = now
 		changes = append(changes, change)
 	}
 	return s.applyOwned(ctx, lease, now, "", changes...)

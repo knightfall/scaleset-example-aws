@@ -183,3 +183,34 @@ func TestProfileCatalogRejectsAnAllDisabledRollout(t *testing.T) {
 		t.Fatalf("invalid rollout changed catalog = %+v, error = %v", catalog, err)
 	}
 }
+
+func TestUnrelatedRolloutPreservesDrainProofAndPendingDeliveryBlocksRetirement(t *testing.T) {
+	ctx := t.Context()
+	ledger, db := store(t)
+	useProfilePrefixQueries(db)
+	now := catalogTime
+	lease := catalogLease(t, ledger, lifecycle.Lease{}, now)
+	if _, err := ledger.ApplyRollout(ctx, lease, catalogRollout(1, lifecycle.ProfileDraining), now); err != nil {
+		t.Fatal(err)
+	}
+	for _, pass := range []lifecycle.RetirementObservation{clearPass("first", now), clearPass("second", now.Add(time.Second))} {
+		if _, err := ledger.RecordRetirementObservation(ctx, lease, 1, "build", pass, time.Second, pass.ObservedAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lease = catalogLease(t, ledger, lease, now.Add(2*time.Second))
+	updated, err := ledger.ApplyRollout(ctx, lease, catalogRollout(2, lifecycle.ProfileDraining), now.Add(2*time.Second))
+	if err != nil || updated.Profiles["build"].Retirement == nil || !updated.Profiles["build"].Retirement.Ready {
+		t.Fatalf("unchanged draining profile lost proof: %+v, %v", updated, err)
+	}
+	if err := ledger.BeginDeliverySession(ctx, lease, "build", "", "owned", nil, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.PersistDelivery(ctx, lease, "build", "owned", now, lifecycle.Delivery{MessageID: 0}); err != nil {
+		t.Fatal(err)
+	}
+	lease = catalogLease(t, ledger, lease, now.Add(3*time.Second))
+	if _, err := ledger.ApplyRollout(ctx, lease, catalogRollout(3, ""), now.Add(3*time.Second)); !errors.Is(err, lifecycle.ErrProfileRetirement) {
+		t.Fatalf("retirement ignored pending message zero: %v", err)
+	}
+}
