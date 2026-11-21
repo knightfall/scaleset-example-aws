@@ -216,7 +216,7 @@ func useProfilePrefixQueries(db *database) {
 		partition := stringValue(input.ExpressionAttributeValues[":pk"])
 		prefix := stringValue(input.ExpressionAttributeValues[":prefix"])
 		if prefix == "OP#" {
-			return db.queryEffectHistory(input)
+			return db.queryEffectRows(input)
 		}
 		db.mu.Lock()
 		defer db.mu.Unlock()

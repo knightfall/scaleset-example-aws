@@ -43,12 +43,20 @@ func (s *Store) Effect(ctx context.Context, deployment, profile, id string) (*Ef
 	if err != nil || record == nil {
 		return nil, err
 	}
+	effect, err := decodeEffect(*record, id)
+	if err != nil {
+		return nil, err
+	}
+	return &effect, nil
+}
+
+func decodeEffect(record Record, id string) (Effect, error) {
 	var effect Effect
-	if err := json.Unmarshal(record.Payload, &effect); err != nil || effect.ID != id {
-		return nil, errors.New("invalid durable effect record")
+	if err := json.Unmarshal(record.Payload, &effect); err != nil || id == "" || strings.Contains(id, "#") || effect.ID != id {
+		return Effect{}, errors.New("invalid durable effect record")
 	}
 	effect.Revision = record.Revision
-	return &effect, nil
+	return effect, nil
 }
 
 func (s *Store) PlanEffect(ctx context.Context, lease Lease, profile string, effect Effect, now time.Time) (Effect, error) {
@@ -163,11 +171,11 @@ func (s *Store) settleEffect(ctx context.Context, lease Lease, profile string, e
 	if err != nil {
 		return Effect{}, err
 	}
-	counter, err := s.changeEffectCount(ctx, lease, profile, now, -1)
+	membership, err := s.effectMembershipChanges(ctx, lease, profile, effect.ID, now, -1)
 	if err != nil {
 		return Effect{}, err
 	}
-	if err := s.applyOwned(ctx, lease, now, "", change, counter); err != nil {
+	if err := s.applyOwned(ctx, lease, now, "", append(membership, change)...); err != nil {
 		return Effect{}, err
 	}
 	effect.Revision++
@@ -188,11 +196,11 @@ func (s *Store) saveEffect(ctx context.Context, lease Lease, profile string, eff
 	}
 	changes := []Change{change}
 	if countDelta != 0 {
-		counter, err := s.changeEffectCount(ctx, lease, profile, now, countDelta)
+		membership, err := s.effectMembershipChanges(ctx, lease, profile, effect.ID, now, countDelta)
 		if err != nil {
 			return Effect{}, err
 		}
-		changes = append(changes, counter)
+		changes = append(changes, membership...)
 	} else if err := s.InitializeEffectTracking(ctx, lease, profile, now); err != nil {
 		return Effect{}, err
 	}
