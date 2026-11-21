@@ -132,9 +132,28 @@ test("managed EC2 hosting uses its own network without selecting ECS", () => {
     amiId: "ami-0123456789abcdef0",
     instanceType: "m7i.large",
   };
-  const runtime = compileEnvironmentConfig(stringify(config)).runtime;
-  assert.equal(runtime.config.spec.controller.hosting.type, "ec2");
-  assert.deepEqual(runtime.resources.ecsClusterArns, {});
+  for (const instanceType of [
+    "m7i.large",
+    "c7i-flex.large",
+    "c7i.metal-24xl",
+  ]) {
+    config.spec.controller.hosting.instanceType = instanceType;
+    const runtime = compileEnvironmentConfig(stringify(config)).runtime;
+    assert.deepEqual(
+      runtime.config.spec.controller.hosting,
+      config.spec.controller.hosting,
+    );
+    assert.deepEqual(runtime.resources.ecsClusterArns, {});
+  }
+});
+
+test("rejects create-if-missing with a pinned scale-set ID", () => {
+  const { config } = loadEnvironmentConfig(fargate).runtime;
+  config.spec.profiles[0].github.scaleSetId = 37;
+  assert.throws(
+    () => compileEnvironmentConfig(stringify(config)),
+    /profiles\/0\/github/,
+  );
 });
 
 test("comments and mapping key order produce identical runtime bytes and digest", () => {

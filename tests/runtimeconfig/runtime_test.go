@@ -114,6 +114,14 @@ func TestSharedConfigurationRejections(t *testing.T) {
 	}
 }
 
+func TestRuntimeRejectsPinnedCreateIfMissing(t *testing.T) {
+	data := replace(t, fixture(t, "fargate-only-import"), `"registration": "create-if-missing"`,
+		`"registration": "create-if-missing", "scaleSetId": 37`)
+	if _, err := decoder(t).Decode(data, ""); err == nil || !strings.Contains(err.Error(), "v1alpha1 schema") {
+		t.Fatalf("pinned create-if-missing returned %v", err)
+	}
+}
+
 func TestRuntimeRejectsInvalidInputBeforeCreatingClients(t *testing.T) {
 	loader := decoder(t)
 	original := fixture(t, "asg-only-external")

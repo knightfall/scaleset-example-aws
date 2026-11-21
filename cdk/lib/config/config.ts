@@ -109,8 +109,7 @@ function canonicalScope(connection: GitHubConnection, name: string): string {
     !scope.hostname ||
     scope.username ||
     scope.password ||
-    scope.search ||
-    scope.hash ||
+    /[?#]/.test(connection.scopeURL) ||
     scope.port
   ) {
     throw new Error(

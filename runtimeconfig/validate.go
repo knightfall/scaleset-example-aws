@@ -320,7 +320,7 @@ var scopePath = regexp.MustCompile(`^/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)?/?$`)
 func (c GitHubConnection) CanonicalScope() (string, error) {
 	u, err := url.Parse(c.ScopeURL)
 	if err != nil || !strings.EqualFold(u.Scheme, "https") || u.Hostname() == "" ||
-		u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" ||
+		u.User != nil || strings.ContainsAny(c.ScopeURL, "?#") ||
 		(u.Port() != "" && u.Port() != "443") {
 		return "", errors.New("expected a canonical HTTPS scope URL")
 	}

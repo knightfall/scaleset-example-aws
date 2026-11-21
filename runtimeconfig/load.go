@@ -11,6 +11,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
+
+	"github.com/knightfall/scaleset-example-aws/strictjson"
 )
 
 const (
@@ -66,7 +68,7 @@ func (d *Decoder) Decode(data []byte, expectedSHA256 string) (Artifact, error) {
 
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
-	document, err := readJSONValue(decoder, 0)
+	document, err := strictjson.ReadValue(decoder)
 	if err != nil {
 		return artifact, fmt.Errorf("invalid runtime JSON at byte %d: %w", decoder.InputOffset(), err)
 	}
@@ -95,52 +97,4 @@ func (d *Decoder) Decode(data []byte, expectedSHA256 string) (Artifact, error) {
 		}
 	}
 	return artifact, nil
-}
-
-func readJSONValue(decoder *json.Decoder, depth int) (any, error) {
-	const maxDepth = 64
-	if depth > maxDepth {
-		return nil, errors.New("runtime JSON is nested too deeply")
-	}
-	token, err := decoder.Token()
-	if err != nil {
-		return nil, err
-	}
-	switch token {
-	case json.Delim('{'):
-		object := make(map[string]any)
-		for decoder.More() {
-			key, err := decoder.Token()
-			if err != nil {
-				return nil, err
-			}
-			name, ok := key.(string)
-			if !ok {
-				return nil, errors.New("expected a JSON member name")
-			}
-			if _, exists := object[name]; exists {
-				return nil, errors.New("duplicate JSON member")
-			}
-			value, err := readJSONValue(decoder, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			object[name] = value
-		}
-		_, err := decoder.Token()
-		return object, err
-	case json.Delim('['):
-		array := []any{}
-		for decoder.More() {
-			value, err := readJSONValue(decoder, depth+1)
-			if err != nil {
-				return nil, err
-			}
-			array = append(array, value)
-		}
-		_, err := decoder.Token()
-		return array, err
-	default:
-		return token, nil
-	}
 }
