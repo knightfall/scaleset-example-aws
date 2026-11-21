@@ -172,3 +172,34 @@ func TestRecoveringLeaseCanCancelAnExpiredPlannedEffect(t *testing.T) {
 		t.Fatalf("recovering owner replanned effect: %v", err)
 	}
 }
+
+func TestPlannedEffectCanRenewAttemptDeadlineBeforeDispatch(t *testing.T) {
+	ledger, _ := store(t)
+	now := time.Unix(1700000000, 0)
+	ctx := t.Context()
+	lease, err := ledger.AcquireLease(ctx, "dev", "owner", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	effect := lifecycle.Effect{
+		ID: "request", Kind: "scale", Target: "asg",
+		RequestSHA256: strings.Repeat("ab", 32), Deadline: now.Add(time.Second),
+	}
+	initial, err := ledger.PlanEffect(ctx, lease, "linux", effect, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Second)
+	effect.Deadline = now.Add(time.Second)
+	replanned, err := ledger.PlanEffect(ctx, lease, "linux", effect, now)
+	if err != nil || replanned.Revision != initial.Revision+1 || !replanned.Deadline.Equal(effect.Deadline) {
+		t.Fatalf("replanned effect = %+v, error = %v", replanned, err)
+	}
+	if _, err := ledger.BeginEffect(ctx, lease, "linux", effect.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	effect.Deadline = now.Add(5 * time.Second)
+	if _, err := ledger.PlanEffect(ctx, lease, "linux", effect, now); !errors.Is(err, lifecycle.ErrConflict) {
+		t.Fatalf("executing effect could be replanned: %v", err)
+	}
+}
