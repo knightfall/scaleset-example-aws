@@ -101,6 +101,11 @@ func (l *profileLane) run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			break
 		}
+		if errors.Is(err, lifecycle.ErrEffectTrackingPending) {
+			failures = 0
+			retryAt = time.Now().Add(100 * time.Millisecond)
+			continue
+		}
 		if err != nil {
 			if errors.Is(err, githubsets.ErrUnauthorized) {
 				l.credentials.mu.Lock()

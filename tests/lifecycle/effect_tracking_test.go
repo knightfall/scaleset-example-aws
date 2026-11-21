@@ -101,6 +101,9 @@ func TestEffectTrackingAndJournalCommitAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := ledger.InitializeEffectTracking(ctx, lease, "build", now); err != nil {
+		t.Fatal(err)
+	}
 	interrupted := errors.New("counter transaction interrupted")
 	db.beforeWrite = func(input *dynamodb.TransactWriteItemsInput) error {
 		for _, tx := range input.TransactItems {
@@ -117,6 +120,7 @@ func TestEffectTrackingAndJournalCommitAtomically(t *testing.T) {
 	if effect, err := ledger.Effect(ctx, "dev", "build", intent.ID); err != nil || effect != nil {
 		t.Fatalf("failed counter write committed an effect: %+v, %v", effect, err)
 	}
+	assertEffectCount(t, ledger, lease, "build", 0)
 	db.beforeWrite = nil
 	if _, err := ledger.PlanEffect(ctx, lease, "build", intent, now); err != nil {
 		t.Fatal(err)
@@ -209,7 +213,7 @@ func TestEffectTrackingRejectsMalformedCounts(t *testing.T) {
 	}
 }
 
-func TestEffectTrackingMigratesPaginatedHistoryIncludingVisibleExpiredRows(t *testing.T) {
+func TestEffectTrackingResumesBoundedRebuildWithRetainedHistory(t *testing.T) {
 	ctx := t.Context()
 	ledger, db := store(t)
 	now := admissionTime
@@ -217,8 +221,9 @@ func TestEffectTrackingMigratesPaginatedHistoryIncludingVisibleExpiredRows(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	for index := 0; index < 205; index++ {
-		id := fmt.Sprintf("settled-%03d", index)
+	const historySize = 10000
+	for index := 0; index < historySize; index++ {
+		id := fmt.Sprintf("settled-%05d", index)
 		payload := fmt.Sprintf(`{"id":%q,"state":"confirmed","evidence":"provider:confirmed"}`, id)
 		history := record("dev", lifecycle.ProfileKey("dev", "build", "OP#"+id), payload)
 		history.ExpiresAt = now.Add(-time.Hour)
@@ -229,13 +234,99 @@ func TestEffectTrackingMigratesPaginatedHistoryIncludingVisibleExpiredRows(t *te
 	if err := ledger.Apply(ctx, "", lifecycle.Change{Record: record("dev", lifecycle.ProfileKey("dev", "build", "OP#unfinished"), `{"id":"unfinished","state":"uncertain"}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := ledger.InitializeEffectTracking(ctx, lease, "build", now); err != nil {
+	if settled, err := ledger.ProfileEffectsSettled(ctx, "dev", "build"); err != nil || settled || db.effectPages != 2 {
+		t.Fatalf("read-only probe with unfinished work beyond the budget: settled=%t pages=%d err=%v", settled, db.effectPages, err)
+	}
+	intent := journalEffect("new", now)
+	if _, err := ledger.PlanEffect(ctx, lease, "build", intent, now); !errors.Is(err, lifecycle.ErrEffectTrackingPending) {
+		t.Fatalf("planning while rebuild pending: %v", err)
+	}
+	if effect, err := ledger.Effect(ctx, "dev", "build", intent.ID); err != nil || effect != nil {
+		t.Fatalf("effect planned before rebuild complete: %+v, %v", effect, err)
+	}
+	if count, err := ledger.Get(ctx, lifecycle.ProfileKey("dev", "build", "EFFECTS")); err != nil || count != nil {
+		t.Fatalf("partial count was published: %+v, %v", count, err)
+	}
+	checkpointKey := lifecycle.ProfileKey("dev", "build", "EFFECT-REBUILD")
+	checkpoint, err := ledger.Get(ctx, checkpointKey)
+	if err != nil || checkpoint == nil {
+		t.Fatalf("read committed checkpoint: %+v, %v", checkpoint, err)
+	}
+	interrupted := errors.New("checkpoint transaction interrupted")
+	db.beforeWrite = func(*dynamodb.TransactWriteItemsInput) error { return interrupted }
+	if err := ledger.InitializeEffectTracking(ctx, lease, "build", now); !errors.Is(err, interrupted) {
+		t.Fatalf("interrupted rebuild: %v", err)
+	}
+	db.beforeWrite = nil
+	if current, err := ledger.Get(ctx, checkpointKey); err != nil || current == nil || current.Revision != checkpoint.Revision {
+		t.Fatalf("failed write advanced the checkpoint: %+v, %v", current, err)
+	}
+	reopened, err := lifecycle.NewStore(db, "state")
+	if err != nil {
 		t.Fatal(err)
+	}
+	for pass := 0; pass < historySize/64+2; pass++ {
+		before := db.effectPages
+		err = reopened.InitializeEffectTracking(ctx, lease, "build", now)
+		if used := db.effectPages - before; used > 2 {
+			t.Fatalf("one pass read %d pages", used)
+		}
+		if !errors.Is(err, lifecycle.ErrEffectTrackingPending) {
+			break
+		}
+	}
+	const initialProbesAndInterruptedPage = 3
+	if err != nil || db.effectPages != initialProbesAndInterruptedPage+(historySize+1+31)/32 {
+		t.Fatalf("rebuild didn't resume from durable progress: pages=%d err=%v", db.effectPages, err)
 	}
 	db.query = func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
 		return nil, errors.New("bounded tracking scanned expired history")
 	}
-	assertEffectCount(t, ledger, lease, "build", 1)
+	assertEffectCount(t, reopened, lease, "build", 1)
+}
+
+func TestEffectTrackingDiscardsAnOlderEpochCheckpoint(t *testing.T) {
+	ctx := t.Context()
+	ledger, _ := store(t)
+	now := admissionTime
+	first, err := ledger.AcquireLease(ctx, "dev", "first", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 70; index++ {
+		id := fmt.Sprintf("settled-%03d", index)
+		payload := fmt.Sprintf(`{"id":%q,"state":"confirmed","evidence":"provider:confirmed"}`, id)
+		if err := ledger.ApplyFenced(ctx, first, now, "", lifecycle.Change{
+			Record: record("dev", lifecycle.ProfileKey("dev", "build", "OP#"+id), payload),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ledger.InitializeEffectTracking(ctx, first, "build", now); !errors.Is(err, lifecycle.ErrEffectTrackingPending) {
+		t.Fatalf("first owner didn't leave a partial checkpoint: %v", err)
+	}
+	// An older writer without checkpoint support can change a key that sorted
+	// before the checkpoint. The successor must rescan that part of the journal.
+	if err := ledger.ApplyFenced(ctx, first, now, "", lifecycle.Change{
+		Record: record("dev", lifecycle.ProfileKey("dev", "build", "OP#earlier"), `{"id":"earlier","state":"uncertain"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute + time.Second)
+	second, err := ledger.AcquireLease(ctx, "dev", "second", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.InitializeEffectTracking(ctx, first, "build", now); !errors.Is(err, lifecycle.ErrLeaseLost) {
+		t.Fatalf("former owner advanced checkpoint: %v", err)
+	}
+	if err := ledger.InitializeEffectTracking(ctx, second, "build", now); !errors.Is(err, lifecycle.ErrEffectTrackingPending) {
+		t.Fatalf("new epoch reused an old cursor: %v", err)
+	}
+	if err := ledger.InitializeEffectTracking(ctx, second, "build", now); err != nil {
+		t.Fatal(err)
+	}
+	assertEffectCount(t, ledger, second, "build", 1)
 }
 
 func TestEffectTrackingSerializesConcurrentCountChanges(t *testing.T) {
