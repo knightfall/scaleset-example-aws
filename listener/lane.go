@@ -104,6 +104,12 @@ func (l *profileLane) step(ctx context.Context) error {
 	if owner.Phase == lifecycle.SessionClosed {
 		l.session = nil
 	}
+	if owner.Phase == lifecycle.SessionClosing && l.session != nil && owner.SessionID == l.session.ID() &&
+		!owner.Deadline.After(time.Now()) {
+		request, cancel := boundedContext(ctx, lease.ValidUntil, s.Timing.OperationTimeout)
+		defer cancel()
+		return l.session.CloseOwned(request, s.Store, lease)
+	}
 	if owner.Phase != "" && owner.Phase != lifecycle.SessionClosed &&
 		(l.session == nil || owner.Phase != lifecycle.SessionOpen || owner.SessionID != l.session.ID()) {
 		return lifecycle.ErrSessionRecoveryRequired
