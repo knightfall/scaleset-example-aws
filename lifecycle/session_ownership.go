@@ -246,6 +246,15 @@ func (s *Store) recordSessionClosed(ctx context.Context, lease Lease, profile st
 	if progress.SessionID != current.cursorID() {
 		return ErrSessionChanged
 	}
+	if progress.HasPendingMessage() {
+		pending, err := s.PendingDelivery(ctx, lease.Deployment, profile, progress.SessionID, progress.PendingMessageID)
+		if err != nil {
+			return err
+		}
+		if _, err := s.CancelUnstartedAdmission(ctx, lease, profile, now, pending.Receipt); err != nil {
+			return err
+		}
+	}
 	changes := []Change{change}
 	if progress.SessionID != "" {
 		// Closed sessions no longer provide usable demand. Keep the durable cursor.

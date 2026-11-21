@@ -164,3 +164,38 @@ func TestRejectsMismatchedAndConflictingInput(t *testing.T) {
 		})
 	}
 }
+
+func TestReplayIgnoresDisabledProfilesWhenSettingVirtualTime(t *testing.T) {
+	config := artifact(t, "replay")
+	disabled := config.Config.Spec.Profiles[0]
+	disabled.ID, disabled.State = "disabled", "disabled"
+	config.Config.Spec.Profiles = append(config.Config.Spec.Profiles, disabled)
+	enabled := record(now, 1)
+	ignored := record(now.Add(time.Hour), 2)
+	ignored.ProfileID = disabled.ID
+	report, err := dryrun.Reconcile(config, source(t, "RunnerDemandReplay", ignored, enabled), now.Add(2*time.Hour))
+	if err != nil || !report.AsOf.Equal(now) || len(report.Profiles) != 1 || report.Profiles[0].DemandStatus == "stale" {
+		t.Fatalf("disabled profile changed the virtual clock: %+v, error = %v", report, err)
+	}
+}
+
+func TestSnapshotUsesCanonicalScope(t *testing.T) {
+	input := record(now, 1)
+	input.ScopeURL = "https://www.github.com:443/EXAMPLE-ENGINEERING/"
+	report, err := dryrun.Reconcile(artifact(t, "snapshot"), source(t, "RunnerDemandSnapshot", input), now)
+	if err != nil || len(report.Profiles) != 1 || report.Profiles[0].Assigned == nil || *report.Profiles[0].Assigned != 1 {
+		t.Fatalf("valid canonical scope alias: %+v, error = %v", report, err)
+	}
+}
+
+func TestRejectsDuplicateDemandMembers(t *testing.T) {
+	data := strings.NewReader(`{
+		"apiVersion":"runners.example/v1alpha1","kind":"RunnerDemandSnapshot","environment":"engineering-dev",
+		"records":[{"profileId":"linux-docker","scopeURL":"https://github.com/example-engineering",
+		"runnerGroup":"Linux-Docker","scaleSet":"linux-docker","observedAt":"2026-11-21T00:03:00Z",
+		"demand":{"assignedJobs":1,"assignedJobs":0,"runningJobs":0}}]
+	}`)
+	if _, err := dryrun.Reconcile(artifact(t, "snapshot"), data, now); err == nil || !strings.Contains(err.Error(), "duplicate JSON member") {
+		t.Fatalf("duplicate demand member returned %v", err)
+	}
+}
