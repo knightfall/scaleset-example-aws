@@ -45,6 +45,8 @@ type supervisorRemote struct {
 	opens              map[string]int
 	polling            map[string]int
 	loseClose          bool
+	missingBuild       bool
+	buildCreates       int
 	offered            bool
 	invalidateCapacity func()
 }
@@ -75,6 +77,16 @@ func (r *supervisorRemote) RoundTrip(request *http.Request) (*http.Response, err
 		return fixtureReply(http.StatusOK, `{"count":1,"value":[{"id":19,"name":"Build"}]}`), nil
 	case supervisorSetsPath:
 		name := request.URL.Query().Get("name")
+		if request.Method == http.MethodPost {
+			if !r.missingBuild {
+				return nil, errors.New("unexpected scale set creation")
+			}
+			r.buildCreates++
+			return fixtureReply(http.StatusCreated, `{"id":7}`), nil
+		}
+		if r.missingBuild && name == "linux" && r.buildCreates == 0 {
+			return fixtureReply(http.StatusOK, `{"count":0,"value":[]}`), nil
+		}
 		id := 7
 		if name == "other" {
 			id = 8
@@ -181,7 +193,7 @@ func (r *supervisorRemote) record(event string) {
 	}
 }
 
-func supervisedFixture(t *testing.T, loseClose bool) (*lifecycle.Store, lifecycle.Lease, *supervisorSecrets, *supervisorRemote, listener.Supervisor) {
+func supervisedFixture(t *testing.T, loseClose bool) (*lifecycle.Store, lifecycle.Lease, *supervisorSecrets, *supervisorRemote, listener.Supervisor, *database) {
 	t.Helper()
 	ledger, db := store(t)
 	db.query = func(input *dynamodb.QueryInput) (*dynamodb.QueryOutput, error) {
@@ -218,7 +230,7 @@ func supervisedFixture(t *testing.T, loseClose bool) (*lifecycle.Store, lifecycl
 		Store: ledger, Timing: timing, Logger: slog.New(slog.DiscardHandler),
 		Loader: githubsets.Loader{Secrets: secrets, WrapTransport: func(http.RoundTripper) http.RoundTripper { return remote }},
 	}
-	return ledger, lease, secrets, remote, supervisor
+	return ledger, lease, secrets, remote, supervisor, db
 }
 
 func waitForSupervisorEvents(t *testing.T, events <-chan string, requested ...string) {
@@ -240,7 +252,7 @@ func waitForSupervisorEvents(t *testing.T, events <-chan string, requested ...st
 }
 
 func TestSupervisorRotatesIndependentProfilesAndReleasesAfterShutdown(t *testing.T) {
-	ledger, lease, secrets, remote, supervisor := supervisedFixture(t, false)
+	ledger, lease, secrets, remote, supervisor, _ := supervisedFixture(t, false)
 	artifact := githubCreationConfig()
 	profile := artifact.Config.Spec.Profiles[0]
 	profile.ID = "other"
@@ -311,7 +323,7 @@ func TestSupervisorRotatesIndependentProfilesAndReleasesAfterShutdown(t *testing
 }
 
 func TestSupervisorKeepsLeaseWhenSessionCloseIsUnconfirmed(t *testing.T) {
-	ledger, lease, _, remote, supervisor := supervisedFixture(t, true)
+	ledger, lease, _, remote, supervisor, _ := supervisedFixture(t, true)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	done := make(chan error, 1)
@@ -337,7 +349,7 @@ func TestSupervisorKeepsLeaseWhenSessionCloseIsUnconfirmed(t *testing.T) {
 }
 
 func TestSupervisorRechecksCapacityAfterPollBeforeAdmitting(t *testing.T) {
-	ledger, lease, _, remote, supervisor := supervisedFixture(t, false)
+	ledger, lease, _, remote, supervisor, _ := supervisedFixture(t, false)
 	artifact := githubCreationConfig()
 	artifact.Config.Spec.Profiles[0].Capacity.MaxRunners = 3
 	var proven atomic.Bool
@@ -370,7 +382,7 @@ func TestSupervisorRechecksCapacityAfterPollBeforeAdmitting(t *testing.T) {
 }
 
 func TestSupervisorChecksUnfinishedEffectsBeforeReleasingLease(t *testing.T) {
-	ledger, lease, _, _, supervisor := supervisedFixture(t, false)
+	ledger, lease, _, _, supervisor, _ := supervisedFixture(t, false)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	now := time.Now()
@@ -386,5 +398,93 @@ func TestSupervisorChecksUnfinishedEffectsBeforeReleasingLease(t *testing.T) {
 	current, err := ledger.Lease(t.Context(), "dev")
 	if err != nil || current == nil || current.Phase != lifecycle.LeaseActive {
 		t.Fatalf("unsettled effect released lease: %+v, error = %v", current, err)
+	}
+}
+
+func TestSupervisorRecoversUnstartedScaleSetCreation(t *testing.T) {
+	ledger, lease, _, remote, supervisor, db := supervisedFixture(t, false)
+	remote.missingBuild = true
+	supervisor.Capacity = func(context.Context, runtimeconfig.Profile) (*listener.Capacity, error) {
+		return &listener.Capacity{}, nil
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	failed := false
+	db.beforeWrite = func(input *dynamodb.TransactWriteItemsInput) error {
+		for _, tx := range input.TransactItems {
+			if tx.Put == nil || keyOf(tx.Put.Item).SK != "OP#create-scale-set" {
+				continue
+			}
+			var effect lifecycle.Effect
+			if err := json.Unmarshal([]byte(stringValue(tx.Put.Item["payload"])), &effect); err != nil {
+				return err
+			}
+			if !failed && effect.State == lifecycle.EffectExecuting {
+				failed = true
+				return errors.New("fixture rejected transition before commit")
+			}
+		}
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- supervisor.Run(ctx, githubCreationConfig(), lease) }()
+	waitForSupervisorEvents(t, remote.events, "poll:7")
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("supervisor did not finish shutdown")
+	}
+	if !failed || remote.buildCreates != 1 {
+		t.Fatalf("injected failure = %t, create POSTs = %d, want one POST after the failure", failed, remote.buildCreates)
+	}
+	effect, err := ledger.Effect(t.Context(), "dev", "build", "create-scale-set")
+	if err != nil || effect == nil || effect.State != lifecycle.EffectConfirmed || effect.Evidence != "scale-set:7" {
+		t.Fatalf("confirmed effect after retry = %+v, error = %v", effect, err)
+	}
+}
+
+func TestSupervisorCancelsUnstartedScaleSetCreationBeforeReleasingLease(t *testing.T) {
+	for _, state := range []string{lifecycle.EffectPlanned, lifecycle.EffectExecuting} {
+		t.Run(state, func(t *testing.T) {
+			ledger, lease, _, _, supervisor, _ := supervisedFixture(t, false)
+			now := time.Now().Add(-time.Second)
+			intent := lifecycle.Effect{
+				ID: "create-scale-set", Kind: "create-scale-set", Target: "fixture",
+				RequestSHA256: strings.Repeat("ab", 32), Deadline: now.Add(500 * time.Millisecond),
+			}
+			if _, err := ledger.PlanEffect(t.Context(), lease, "build", intent, now); err != nil {
+				t.Fatal(err)
+			}
+			if state == lifecycle.EffectExecuting {
+				if _, err := ledger.BeginEffect(t.Context(), lease, "build", intent.ID, now); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			ctx, cancel := context.WithCancel(t.Context())
+			cancel()
+			err := supervisor.Run(ctx, githubCreationConfig(), lease)
+			wantEffect, wantLease := lifecycle.EffectCancelled, lifecycle.LeaseReleased
+			if state == lifecycle.EffectExecuting {
+				wantEffect, wantLease = lifecycle.EffectExecuting, lifecycle.LeaseActive
+				if !errors.Is(err, lifecycle.ErrRecoveryRequired) {
+					t.Fatalf("shutdown with executing intent returned %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			effect, err := ledger.Effect(t.Context(), "dev", "build", intent.ID)
+			if err != nil || effect == nil || effect.State != wantEffect {
+				t.Fatalf("effect after shutdown = %+v, want %s, error = %v", effect, wantEffect, err)
+			}
+			current, err := ledger.Lease(t.Context(), "dev")
+			if err != nil || current == nil || current.Phase != wantLease {
+				t.Fatalf("lease after shutdown = %+v, want %s, error = %v", current, wantLease, err)
+			}
+		})
 	}
 }

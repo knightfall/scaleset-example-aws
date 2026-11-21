@@ -21,11 +21,12 @@ import (
 type attributes = map[string]types.AttributeValue
 
 type database struct {
-	mu      sync.Mutex
-	items   map[lifecycle.Key]attributes
-	query   func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error)
-	lastTxn *dynamodb.TransactWriteItemsInput
-	reads   int
+	mu          sync.Mutex
+	items       map[lifecycle.Key]attributes
+	query       func(*dynamodb.QueryInput) (*dynamodb.QueryOutput, error)
+	beforeWrite func(*dynamodb.TransactWriteItemsInput) error
+	lastTxn     *dynamodb.TransactWriteItemsInput
+	reads       int
 }
 
 func (d *database) GetItem(_ context.Context, input *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
@@ -49,6 +50,11 @@ func (d *database) TransactWriteItems(_ context.Context, input *dynamodb.Transac
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.lastTxn = input
+	if d.beforeWrite != nil {
+		if err := d.beforeWrite(input); err != nil {
+			return nil, err
+		}
+	}
 	for index, tx := range input.TransactItems {
 		if tx.ConditionCheck != nil {
 			if !d.leaseMatches(tx.ConditionCheck) {

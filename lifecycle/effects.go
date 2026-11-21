@@ -21,6 +21,7 @@ const (
 	EffectUncertain = "uncertain"
 	EffectConfirmed = "confirmed"
 	EffectAbandoned = "abandoned"
+	EffectCancelled = "cancelled-before-dispatch"
 )
 
 var ErrEffectNotReady = errors.New("effect cannot proceed from its durable state")
@@ -74,10 +75,33 @@ func (s *Store) PlanEffect(ctx context.Context, lease Lease, profile string, eff
 		return Effect{}, err
 	}
 	if existing == nil || existing.Kind != effect.Kind || existing.Target != effect.Target ||
-		existing.RequestSHA256 != effect.RequestSHA256 || !existing.Deadline.Equal(effect.Deadline) {
+		existing.RequestSHA256 != effect.RequestSHA256 {
+		return Effect{}, ErrConflict
+	}
+	if existing.State == EffectCancelled {
+		// A cancelled intent never reached executing and can be planned again.
+		effect.Revision = existing.Revision
+		return s.saveEffect(ctx, lease, profile, effect, now)
+	}
+	if !existing.Deadline.Equal(effect.Deadline) {
 		return Effect{}, ErrConflict
 	}
 	return *existing, nil
+}
+
+// CancelPlannedEffect settles an intent that never started. The revision
+// check prevents cancelling an intent that concurrently reaches executing.
+func (s *Store) CancelPlannedEffect(ctx context.Context, lease Lease, profile, id string, now time.Time) (bool, error) {
+	effect, err := s.Effect(ctx, lease.Deployment, profile, id)
+	if err != nil {
+		return false, err
+	}
+	if effect == nil || effect.State != EffectPlanned {
+		return false, nil
+	}
+	effect.State = EffectCancelled
+	_, err = s.settleEffect(ctx, lease, profile, *effect, now)
+	return err == nil, err
 }
 
 // BeginEffect persists execution before a caller issues its provider request.
@@ -128,6 +152,10 @@ func (s *Store) ResolveEffect(
 	if !applied {
 		effect.State = EffectAbandoned
 	}
+	return s.settleEffect(ctx, lease, profile, *effect, now)
+}
+
+func (s *Store) settleEffect(ctx context.Context, lease Lease, profile string, effect Effect, now time.Time) (Effect, error) {
 	change, err := effect.change(lease.Deployment, profile, time.Time{})
 	if err != nil {
 		return Effect{}, err
@@ -136,7 +164,7 @@ func (s *Store) ResolveEffect(
 		return Effect{}, err
 	}
 	effect.Revision++
-	return *effect, nil
+	return effect, nil
 }
 
 func (s *Store) saveEffect(ctx context.Context, lease Lease, profile string, effect Effect, now time.Time) (Effect, error) {
@@ -211,6 +239,8 @@ func settledEffect(item map[string]types.AttributeValue, deployment, partition s
 		return false, errors.New("invalid durable profile effect")
 	}
 	switch effect.State {
+	case EffectCancelled:
+		return true, nil
 	case EffectConfirmed, EffectAbandoned:
 		return effect.Evidence != "", nil
 	case EffectPlanned, EffectExecuting, EffectUncertain:
