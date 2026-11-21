@@ -53,7 +53,7 @@ func (c *Connection) openSession(ctx context.Context, ledger *lifecycle.Store, l
 	}
 	raw, err := c.client.MessageSessionClient(oneWriteAttempt(ctx), target.ScaleSetID, intent.OwnerName)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrSessionUnconfirmed, requestError("open GitHub session", err))
+		return nil, fmt.Errorf("%w: %w", ErrSessionUnconfirmed, requestError("open GitHub session", err, c.rateLimitKey))
 	}
 	session, err := AdaptSession(raw)
 	if err != nil {
@@ -73,6 +73,7 @@ func (c *Connection) openSession(ctx context.Context, ledger *lifecycle.Store, l
 	session.deployment = lease.Deployment
 	session.profile = profile
 	session.credentialVersion = c.VersionID
+	session.rateLimitKey = c.rateLimitKey
 	return session, nil
 }
 
@@ -90,7 +91,7 @@ func (s *Session) CloseOwned(ctx context.Context, ledger *lifecycle.Store, lease
 		return nil
 	}
 	if err := s.client.Close(oneWriteAttempt(ctx)); err != nil {
-		return fmt.Errorf("%w: %w", ErrSessionUnconfirmed, requestError("close GitHub session", err))
+		return fmt.Errorf("%w: %w", ErrSessionUnconfirmed, requestError("close GitHub session", err, s.rateLimitKey))
 	}
 	if err := ledger.ConfirmSessionClose(ctx, lease, s.profile, intent, time.Now()); err != nil {
 		return fmt.Errorf("%w: %w", ErrSessionUnconfirmed, err)

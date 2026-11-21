@@ -2,6 +2,7 @@ package listener
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -154,19 +155,19 @@ func (s Supervisor) releaseWhenSettled(ctx context.Context, profiles []runtimeco
 
 func (s Supervisor) profileLanes(artifact runtimeconfig.Artifact, lease *atomic.Pointer[lifecycle.Lease]) []profileLane {
 	connections := make(map[string]*credentialState)
-	cooldowns := make(map[string]*credentialCooldown)
+	limits := &credentialLimits{byKey: make(map[[32]byte]*credentialCooldown)}
 	var lanes []profileLane
 	for _, profile := range artifact.Config.Spec.Profiles {
 		if profile.State == "disabled" {
 			continue
 		}
 		name := profile.GitHub.Connection
-		secretARN := artifact.Config.Spec.GitHub[name].Auth.SecretARN
-		if cooldowns[secretARN] == nil {
-			cooldowns[secretARN] = &credentialCooldown{}
-		}
 		if connections[name] == nil {
-			connections[name] = &credentialState{cooldown: cooldowns[secretARN]}
+			state := &credentialState{limits: limits}
+			secretARN := artifact.Config.Spec.GitHub[name].Auth.SecretARN
+			key := sha256.Sum256([]byte("secrets-manager:" + secretARN))
+			state.cooldown.Store(limits.forCredential(key))
+			connections[name] = state
 		}
 		lanes = append(lanes, profileLane{
 			supervisor: s, artifact: artifact, profile: profile, held: lease, credentials: connections[name],
@@ -194,6 +195,20 @@ func waitUntil(ctx context.Context, deadline time.Time) bool {
 	}
 }
 
+type credentialLimits struct {
+	mu    sync.Mutex
+	byKey map[[32]byte]*credentialCooldown
+}
+
+func (l *credentialLimits) forCredential(key [32]byte) *credentialCooldown {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.byKey[key] == nil {
+		l.byKey[key] = &credentialCooldown{}
+	}
+	return l.byKey[key]
+}
+
 type credentialCooldown struct {
 	mu    sync.Mutex
 	until time.Time
@@ -205,11 +220,7 @@ func (c *credentialCooldown) deadline() time.Time {
 	return c.until
 }
 
-func (c *credentialCooldown) record(err error) {
-	rateLimit, ok := errors.AsType[*githubsets.RateLimitError](err)
-	if !ok {
-		return
-	}
+func (c *credentialCooldown) record(rateLimit *githubsets.RateLimitError) {
 	now := time.Now()
 	until := now.Add(rateLimit.RetryAfter)
 	if rateLimit.RetryAfter <= 0 && !rateLimit.Reset.After(now) {

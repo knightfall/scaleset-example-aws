@@ -3,12 +3,14 @@ package githubsets
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -64,19 +66,25 @@ func (l Loader) Load(ctx context.Context, artifact runtimeconfig.Artifact, name 
 	if err != nil {
 		return nil, err
 	}
-	client, version, err := l.loadClient(ctx, config.Auth, scope, httpClient)
+	credential, err := l.loadClient(ctx, config.Auth, scope, httpClient)
 	if err != nil {
 		return nil, err
 	}
 	return &Connection{
-		client: client, deployment: artifact.Config.Metadata.Name,
-		scope: scope, profiles: profiles, VersionID: version,
+		client: credential.client, deployment: artifact.Config.Metadata.Name,
+		scope: scope, profiles: profiles, VersionID: credential.version, rateLimitKey: credential.limitKey,
 	}, nil
 }
 
-func (l Loader) loadClient(ctx context.Context, auth runtimeconfig.GitHubAuth, scope string, httpClient *http.Client) (*scaleset.Client, string, error) {
+type loadedCredential struct {
+	client   *scaleset.Client
+	version  string
+	limitKey [32]byte
+}
+
+func (l Loader) loadClient(ctx context.Context, auth runtimeconfig.GitHubAuth, scope string, httpClient *http.Client) (loadedCredential, error) {
 	if l.Secrets == nil || auth.SecretARN == "" {
-		return nil, "", ErrSecretUnavailable
+		return loadedCredential{}, ErrSecretUnavailable
 	}
 	secret, err := l.Secrets.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{
 		SecretId: aws.String(auth.SecretARN), VersionStage: aws.String("AWSCURRENT"),
@@ -86,29 +94,29 @@ func (l Loader) loadClient(ctx context.Context, auth runtimeconfig.GitHubAuth, s
 	if err != nil {
 		switch {
 		case errors.Is(err, context.Canceled):
-			return nil, "", context.Canceled
+			return loadedCredential{}, context.Canceled
 		case errors.Is(err, context.DeadlineExceeded):
-			return nil, "", context.DeadlineExceeded
+			return loadedCredential{}, context.DeadlineExceeded
 		default:
-			return nil, "", ErrSecretUnavailable
+			return loadedCredential{}, ErrSecretUnavailable
 		}
 	}
 	if secret == nil || aws.ToString(secret.ARN) != auth.SecretARN || aws.ToString(secret.VersionId) == "" ||
 		secret.SecretString == nil || len(secret.SecretBinary) != 0 {
-		return nil, "", ErrInvalidSecret
+		return loadedCredential{}, ErrInvalidSecret
 	}
 	fields, err := secretFields(*secret.SecretString)
 	if err != nil {
-		return nil, "", err
+		return loadedCredential{}, err
 	}
-	client, err := newClient(scope, auth.Type, fields, httpClient)
+	client, limitKey, err := newClient(scope, auth.Type, fields, httpClient)
 	if err != nil {
-		return nil, "", err
+		return loadedCredential{}, err
 	}
-	return client, *secret.VersionId, nil
+	return loadedCredential{client: client, version: *secret.VersionId, limitKey: limitKey}, nil
 }
 
-func newClient(scope, kind string, fields map[string]json.RawMessage, httpClient *http.Client) (*scaleset.Client, error) {
+func newClient(scope, kind string, fields map[string]json.RawMessage, httpClient *http.Client) (*scaleset.Client, [32]byte, error) {
 	retry := scaleset.DefaultRetryConfig()
 	retry.OnRateLimit = scaleset.RateLimitRetries(scaleset.RateLimitRule{}, scaleset.RateLimitRule{})
 	options := []scaleset.HTTPOption{
@@ -119,13 +127,15 @@ func newClient(scope, kind string, fields map[string]json.RawMessage, httpClient
 	info := scaleset.SystemInfo{System: "scaleset-example-aws", Subsystem: "controller"}
 	var client *scaleset.Client
 	var err error
+	var identity string
 	switch kind {
 	case "enterprise-pat":
 		var token string
 		if len(fields) != 1 || json.Unmarshal(fields["token"], &token) != nil ||
 			token == "" || strings.IndexFunc(token, unicode.IsSpace) >= 0 {
-			return nil, fmt.Errorf("%w: expected one nonempty token field", ErrInvalidSecret)
+			return nil, [32]byte{}, fmt.Errorf("%w: expected one nonempty token field", ErrInvalidSecret)
 		}
+		identity = token
 		client, err = scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{
 			GitHubConfigURL: scope, PersonalAccessToken: token, SystemInfo: info,
 		}, options...)
@@ -135,18 +145,20 @@ func newClient(scope, kind string, fields map[string]json.RawMessage, httpClient
 			json.Unmarshal(fields["installationId"], &auth.InstallationID) != nil ||
 			json.Unmarshal(fields["privateKey"], &auth.PrivateKey) != nil ||
 			strings.TrimSpace(auth.ClientID) == "" || auth.InstallationID <= 0 || auth.PrivateKey == "" {
-			return nil, fmt.Errorf("%w: expected clientId, installationId and privateKey", ErrInvalidSecret)
+			return nil, [32]byte{}, fmt.Errorf("%w: expected clientId, installationId and privateKey", ErrInvalidSecret)
 		}
+		identity = strconv.FormatInt(auth.InstallationID, 10)
 		client, err = scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{
 			GitHubConfigURL: scope, GitHubAppAuth: auth, SystemInfo: info,
 		}, options...)
 	default:
-		return nil, errors.New("unsupported GitHub credential type")
+		return nil, [32]byte{}, errors.New("unsupported GitHub credential type")
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: could not initialise GitHub authentication", ErrInvalidSecret)
+		return nil, [32]byte{}, fmt.Errorf("%w: could not initialise GitHub authentication", ErrInvalidSecret)
 	}
-	return client, nil
+	host, _, _ := strings.Cut(strings.TrimPrefix(scope, "https://"), "/")
+	return client, sha256.Sum256([]byte(host + "\x00" + kind + "\x00" + identity)), nil
 }
 
 func secretFields(value string) (map[string]json.RawMessage, error) {

@@ -24,11 +24,18 @@ var (
 )
 
 type Connection struct {
-	VersionID  string
-	client     *scaleset.Client
-	deployment string
-	scope      string
-	profiles   []runtimeconfig.Profile
+	VersionID    string
+	client       *scaleset.Client
+	deployment   string
+	scope        string
+	profiles     []runtimeconfig.Profile
+	rateLimitKey [32]byte
+}
+
+// RateLimitKey identifies equivalent credentials across named connections.
+// Use it only to share in-memory cooldown state.
+func (c *Connection) RateLimitKey() [32]byte {
+	return c.rateLimitKey
 }
 
 type ScaleSet struct {
@@ -153,7 +160,7 @@ func (c *Connection) createAndConfirm(
 ) (ScaleSet, error) {
 	created, err := c.client.CreateRunnerScaleSet(oneWriteAttempt(ctx), &parameters)
 	if err != nil {
-		return ScaleSet{}, fmt.Errorf("%w: %w", ErrCreateUnconfirmed, requestError("create scale set", err))
+		return ScaleSet{}, fmt.Errorf("%w: %w", ErrCreateUnconfirmed, requestError("create scale set", err, c.rateLimitKey))
 	}
 	confirmed, err := c.lookupSet(ctx, binding, parameters.RunnerGroupID)
 	if err != nil {
@@ -192,7 +199,7 @@ func (c *Connection) lookup(ctx context.Context, binding runtimeconfig.GitHubBin
 	}
 	group, err := c.client.GetRunnerGroupByName(ctx, binding.RunnerGroup)
 	if err != nil {
-		return ScaleSet{}, requestError("resolve runner group", err)
+		return ScaleSet{}, requestError("resolve runner group", err, c.rateLimitKey)
 	}
 	if group == nil || group.ID <= 0 || !strings.EqualFold(group.Name, binding.RunnerGroup) {
 		return ScaleSet{}, ErrRegistrationDrift
@@ -203,7 +210,7 @@ func (c *Connection) lookup(ctx context.Context, binding runtimeconfig.GitHubBin
 func (c *Connection) lookupSet(ctx context.Context, binding runtimeconfig.GitHubBinding, groupID int) (ScaleSet, error) {
 	set, err := c.client.GetRunnerScaleSet(ctx, groupID, binding.ScaleSet)
 	if err != nil {
-		return ScaleSet{}, requestError("resolve scale set", err)
+		return ScaleSet{}, requestError("resolve scale set", err, c.rateLimitKey)
 	}
 	if set == nil {
 		return ScaleSet{GroupID: groupID}, ErrScaleSetMissing
