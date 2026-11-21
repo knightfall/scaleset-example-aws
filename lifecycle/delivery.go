@@ -111,7 +111,7 @@ func (s *Store) BeginDeliverySession(ctx context.Context, lease Lease, profile, 
 
 func newSessionProgress(revision int64, session string, initial *DemandCounts, now time.Time) SessionProgress {
 	progress := SessionProgress{SessionID: session, revision: revision}
-	if initial != nil {
+	if initial != nil && initial.valid() {
 		progress.Demand = &DemandObservation{DemandCounts: *initial, ObservedAt: now.UTC()}
 	}
 	return progress
@@ -179,16 +179,21 @@ func (s *Store) PersistDelivery(ctx context.Context, lease Lease, profile, sessi
 	progress.PendingMessageID = delivery.MessageID
 	progress.PendingZeroMessage = delivery.MessageID == 0
 	if delivery.Stats != nil {
-		progress.Demand = &DemandObservation{
-			DemandCounts: *delivery.Stats, ObservedAt: entry.ReceivedAt, MessageID: delivery.MessageID,
+		// An inconsistent snapshot cannot support admission. Keep the job
+		// facts and invalidate the previous demand until a usable sample arrives.
+		progress.Demand = nil
+		if delivery.Stats.valid() {
+			progress.Demand = &DemandObservation{
+				DemandCounts: *delivery.Stats, ObservedAt: entry.ReceivedAt, MessageID: delivery.MessageID,
+			}
 		}
 	}
 	return s.writeProgress(ctx, lease, profile, now, progress, processed)
 }
 
 func (d Delivery) validate() error {
-	if d.MessageID < 0 || (d.Stats != nil && !d.Stats.valid()) {
-		return errors.New("invalid delivery ID or demand observation")
+	if d.MessageID < 0 {
+		return errors.New("invalid delivery ID")
 	}
 	for _, id := range d.Offers {
 		if id <= 0 {

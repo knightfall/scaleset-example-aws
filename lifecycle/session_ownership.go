@@ -132,7 +132,7 @@ func (s *Store) BeginSessionOpen(ctx context.Context, lease Lease, profile strin
 
 func (s *Store) ConfirmSessionOpen(ctx context.Context, lease Lease, profile string, intent SessionOwnership, sessionID string, initial *DemandCounts, now time.Time) (SessionOwnership, error) {
 	if intent.Phase != SessionOpening || intent.ControllerID != lease.Owner || intent.Epoch != lease.Epoch ||
-		sessionID == "" || strings.Contains(sessionID, "#") || (initial != nil && !initial.valid()) {
+		sessionID == "" || strings.Contains(sessionID, "#") {
 		return SessionOwnership{}, ErrSessionChanged
 	}
 	current, err := s.SessionOwnership(ctx, lease.Deployment, profile)
