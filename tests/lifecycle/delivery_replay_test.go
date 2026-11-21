@@ -45,11 +45,12 @@ func TestDeliveryReplayAfterInterruptedWriteUsesStableFacts(t *testing.T) {
 	if err := ledger.PersistDelivery(ctx, lease, profile, session, now, replayed); !errors.Is(err, lifecycle.ErrConflict) {
 		t.Fatalf("changed job offers returned %v", err)
 	}
-	if err := ledger.PersistDelivery(ctx, lease, profile, session, now, delivery); err != nil {
+	replayedAt := now.Add(10 * time.Second)
+	if err := ledger.PersistDelivery(ctx, lease, profile, session, replayedAt, delivery); err != nil {
 		t.Fatalf("same message with fresh statistics: %v", err)
 	}
 	progress, err := ledger.SessionProgress(ctx, "dev", profile)
-	if err != nil || progress.PendingMessageID != 1 || progress.Demand == nil || progress.Demand.Assigned != 2 {
+	if err != nil || progress.PendingMessageID != 1 || progress.Demand == nil || progress.Demand.Assigned != 2 || !progress.Demand.ObservedAt.Equal(replayedAt) {
 		t.Fatalf("resumed progress = %+v, error = %v", progress, err)
 	}
 }

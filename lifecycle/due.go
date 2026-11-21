@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -68,7 +69,7 @@ func (s *Store) dueInShard(ctx context.Context, deployment string, shard int, be
 		}
 		for _, item := range page.Items {
 			key := readKey(item)
-			if seen[key] {
+			if seen[key] || strings.HasPrefix(key.SK, "ACQUIRE#") {
 				continue
 			}
 			seen[key] = true

@@ -2,6 +2,7 @@ package lifecycle_test
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -19,7 +20,7 @@ func TestAdmissionUsesRequestFactsAndContemporaneousStatistics(t *testing.T) {
 		state    string
 		send     bool
 	}{
-		{"assigned and reflected", lifecycle.JobFact{RequestID: 100, Phase: lifecycle.JobAssigned}, &lifecycle.DemandCounts{Assigned: 1}, 1, "accounted", true},
+		{"assigned and reflected", lifecycle.JobFact{RequestID: 100, Phase: lifecycle.JobAssigned}, &lifecycle.DemandCounts{Assigned: 1}, 1, "accepted", false},
 		{"assigned with a stale sample", lifecycle.JobFact{RequestID: 100, Phase: lifecycle.JobAssigned}, nil, 1, "accepted", false},
 		{"unrelated assignment", lifecycle.JobFact{RequestID: 99, Phase: lifecycle.JobAssigned}, &lifecycle.DemandCounts{Assigned: 1}, 1, "accepted", false},
 		{"completion without timestamp", lifecycle.JobFact{RequestID: 100, Phase: lifecycle.JobCompleted}, nil, 1, "terminal", true},
@@ -105,5 +106,43 @@ func TestAccountingAndItsDemandSnapshotCommitTogether(t *testing.T) {
 	})
 	if err != nil || decision.Send {
 		t.Fatalf("replay admitted extra work: %+v, error = %v", decision, err)
+	}
+}
+
+func TestLaggingStatisticsCannotReleaseAssignedReservations(t *testing.T) {
+	for _, count := range []int{2, 97} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			ctx := t.Context()
+			now := admissionTime
+			ledger, _, lease := admissionStore(t, now)
+			const profile, session = "build", "owned"
+			if err := ledger.BeginDeliverySession(ctx, lease, profile, "", session, nil, now); err != nil {
+				t.Fatal(err)
+			}
+			var jobs []lifecycle.JobFact
+			for index := range count {
+				id := int64(index + 1)
+				first := offer(session, id, id)
+				first.EffectiveMax = count + 1
+				first.OutsideAssigned = 0
+				decision, err := ledger.ReserveAdmission(ctx, lease, profile, now, first)
+				if err != nil || !decision.Send {
+					t.Fatalf("reserve %d: %+v, %v", id, decision, err)
+				}
+				if err := ledger.RecordAdmissionOutcome(ctx, lease, profile, now, first.Message, []int64{id}); err != nil {
+					t.Fatal(err)
+				}
+				jobs = append(jobs, lifecycle.JobFact{RequestID: id, Phase: lifecycle.JobAssigned})
+			}
+			delivery := lifecycle.Delivery{MessageID: int64(count + 1), Stats: &lifecycle.DemandCounts{Assigned: 1}, Jobs: jobs}
+			if err := ledger.PersistDelivery(ctx, lease, profile, session, now, delivery); err != nil {
+				t.Fatal(err)
+			}
+			for _, job := range jobs {
+				if got := acquisitionState(t, ledger, job.RequestID); got != "accepted" {
+					t.Fatalf("lagging statistics released request %d into %q", job.RequestID, got)
+				}
+			}
+		})
 	}
 }

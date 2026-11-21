@@ -184,18 +184,13 @@ func (s *Store) PersistDelivery(ctx context.Context, lease Lease, profile, sessi
 		progress.Demand = nil
 		if stats.valid() {
 			progress.Demand = &DemandObservation{
-				DemandCounts: *stats, ObservedAt: entry.ReceivedAt, MessageID: delivery.MessageID,
+				DemandCounts: *stats, ObservedAt: now.UTC(), MessageID: delivery.MessageID,
 			}
 		}
 	}
-	if stats == nil || progress.Demand == nil || stats.Assigned == 0 {
-		return s.writeProgress(ctx, lease, profile, now, progress, processed)
-	}
-	accounted, err := s.accountedReservations(ctx, lease.Deployment, profile, entry.InboxMessage, jobs)
-	if err != nil {
-		return err
-	}
-	return s.writeProgress(ctx, lease, profile, now, progress, append(accounted, processed)...)
+	// Aggregate statistics cannot prove that a particular reservation is included.
+	// Keep reservations until request-specific evidence authorizes their release.
+	return s.writeProgress(ctx, lease, profile, now, progress, processed)
 }
 
 func (d Delivery) validate() error {

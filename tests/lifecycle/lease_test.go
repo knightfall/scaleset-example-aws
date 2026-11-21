@@ -199,7 +199,8 @@ func TestPlannedEffectCanRenewAttemptDeadlineBeforeDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	effect.Deadline = now.Add(5 * time.Second)
-	if _, err := ledger.PlanEffect(ctx, lease, "linux", effect, now); !errors.Is(err, lifecycle.ErrConflict) {
-		t.Fatalf("executing effect could be replanned: %v", err)
+	replayed, err := ledger.PlanEffect(ctx, lease, "linux", effect, now)
+	if err != nil || replayed.State != lifecycle.EffectExecuting || !replayed.Deadline.Equal(replanned.Deadline) {
+		t.Fatalf("dispatched effect changed on replay: %+v, %v", replayed, err)
 	}
 }

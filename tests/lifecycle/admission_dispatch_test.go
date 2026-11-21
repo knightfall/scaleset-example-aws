@@ -81,8 +81,8 @@ func TestAcquisitionDispatchRemainsReservedWhenProviderOutcomeIsUnknown(t *testi
 		t.Fatal(err)
 	}
 	item, err := ledger.Get(ctx, lifecycle.ProfileKey("dev", "build", "ACQUIRE#100"))
-	if err != nil || item == nil || item.DueAt.IsZero() || acquisitionState(t, ledger, 100) != "uncertain" {
-		t.Fatalf("ambiguous acquisition is missing from recovery index: %+v, error = %v", item, err)
+	if err != nil || item == nil || !item.DueAt.IsZero() || acquisitionState(t, ledger, 100) != "uncertain" {
+		t.Fatalf("ambiguous acquisition entered the general effect recovery index: %+v, error = %v", item, err)
 	}
 }
 
@@ -122,6 +122,49 @@ func TestClosingSessionReleasesAnUnstartedAcquisition(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := acquisitionState(t, ledger, 100); got != "unstarted" {
+		t.Fatalf("session closure left an unstarted reservation in %q", got)
+	}
+}
+
+func TestClosingSessionPreservesDispatchedAcquisitionAsUncertain(t *testing.T) {
+	ctx := t.Context()
+	now := admissionTime
+	ledger, _, lease := admissionStore(t, now)
+	const profile, session = "build", "old-session"
+	deadline := now.Add(10 * time.Second)
+	target := lifecycle.SessionTarget{Scope: "https://github.com/example", ScaleSetID: 19}
+	opening, err := ledger.BeginSessionOpen(ctx, lease, profile, target, now, deadline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened, err := ledger.ConfirmSessionOpen(ctx, lease, profile, opening, session, nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.PersistDelivery(ctx, lease, profile, session, now, lifecycle.Delivery{MessageID: 0, Offers: []int64{100}}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := ledger.PendingDelivery(ctx, "dev", profile, session, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := ledger.ReserveAdmission(ctx, lease, profile, now, lifecycle.AdmissionOffer{
+		Message: pending.Receipt, RequestIDs: pending.Offers, EffectiveMax: 1,
+	})
+	if err != nil || !decision.Send {
+		t.Fatalf("reservation = %+v, error = %v", decision, err)
+	}
+	if err := ledger.BeginAdmissionDispatch(ctx, lease, profile, now, pending.Receipt); err != nil {
+		t.Fatal(err)
+	}
+	closing, err := ledger.BeginSessionClose(ctx, lease, profile, opened.OwnerName, session, now, deadline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.ConfirmSessionClose(ctx, lease, profile, closing, now); err != nil {
+		t.Fatal(err)
+	}
+	if got := acquisitionState(t, ledger, 100); got != "uncertain" {
 		t.Fatalf("session closure left an unstarted reservation in %q", got)
 	}
 }

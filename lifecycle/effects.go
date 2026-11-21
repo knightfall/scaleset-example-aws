@@ -86,9 +86,6 @@ func (s *Store) PlanEffect(ctx context.Context, lease Lease, profile string, eff
 		}
 	case EffectCancelled:
 	default:
-		if !existing.Deadline.Equal(effect.Deadline) {
-			return Effect{}, ErrConflict
-		}
 		return *existing, nil
 	}
 	// An intent that never crossed the dispatch boundary can acquire a fresh
