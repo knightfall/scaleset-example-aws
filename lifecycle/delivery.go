@@ -134,11 +134,7 @@ func (s *Store) PersistDelivery(ctx context.Context, lease Lease, profile, sessi
 	if progress.HasPendingMessage() && progress.PendingMessageID != delivery.MessageID {
 		return errors.New("a different delivery is still pending")
 	}
-	message, err := delivery.receipt(session, now)
-	if err != nil {
-		return err
-	}
-	entry, revision, err := s.readInbox(ctx, lease.Deployment, profile, message)
+	entry, revision, err := s.readDeliveryReceipt(ctx, lease.Deployment, profile, session, now, delivery)
 	if err != nil {
 		return err
 	}
@@ -148,7 +144,7 @@ func (s *Store) PersistDelivery(ctx context.Context, lease Lease, profile, sessi
 	if progress.acknowledged(delivery.MessageID) {
 		return errors.New("out-of-order delivery has no durable facts")
 	}
-	key := inboxKey(lease.Deployment, profile, message)
+	key := inboxKey(lease.Deployment, profile, entry.InboxMessage)
 	if revision == 0 {
 		receipt, err := admissionChange(lease.Deployment, key, 0, entry)
 		if err != nil {
@@ -205,6 +201,29 @@ func (d Delivery) validate() error {
 		}
 	}
 	return nil
+}
+
+func (s *Store) readDeliveryReceipt(
+	ctx context.Context, deployment, profile, session string, now time.Time, delivery Delivery,
+) (inboxEntry, int64, error) {
+	// Statistics are a snapshot and can change when GitHub redelivers the same message.
+	stable := delivery
+	stable.Stats = nil
+	message, err := stable.receipt(session, now)
+	if err != nil {
+		return inboxEntry{}, 0, err
+	}
+	entry, revision, err := s.readInbox(ctx, deployment, profile, message)
+	if !errors.Is(err, ErrConflict) || delivery.Stats == nil {
+		return entry, revision, err
+	}
+
+	// Older receipts hashed the whole delivery. Accept an exact legacy replay.
+	legacy, err := delivery.receipt(session, now)
+	if err != nil {
+		return inboxEntry{}, 0, err
+	}
+	return s.readInbox(ctx, deployment, profile, legacy)
 }
 
 func (d Delivery) receipt(session string, now time.Time) (InboxMessage, error) {
