@@ -58,7 +58,7 @@ func TestOneWriteAttemptKeepsCredentialExchangeRetries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := newClient("https://github.com/enterprises/fixture", "enterprise-pat",
+	client, _, err := newClient("https://github.com/enterprises/fixture", "enterprise-pat",
 		map[string]json.RawMessage{"token": json.RawMessage(`"fixture-pat"`)}, httpClient)
 	if err != nil {
 		t.Fatal(err)
@@ -67,5 +67,29 @@ func TestOneWriteAttemptKeepsCredentialExchangeRetries(t *testing.T) {
 	_, err = client.CreateRunnerScaleSet(ctx, &scaleset.RunnerScaleSet{Name: "fixture"})
 	if !errors.Is(err, mutationFailed) || exchanges != 2 || creates != 1 {
 		t.Fatalf("error = %v, credential exchanges = %d, create attempts = %d", err, exchanges, creates)
+	}
+}
+
+func TestCredentialRateLimitIdentityIsIndependentOfConnectionScope(t *testing.T) {
+	client, err := githubHTTPClient("", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := func(t *testing.T, scope, token string) [32]byte {
+		t.Helper()
+		_, key, err := newClient(scope, "enterprise-pat",
+			map[string]json.RawMessage{"token": json.RawMessage(fmt.Sprintf("%q", token))}, client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return key
+	}
+	original := key(t, "https://github.com/enterprises/first", "fixture-pat")
+	if original == ([32]byte{}) || original != key(t, "https://github.com/enterprises/second", "fixture-pat") {
+		t.Fatal("equivalent credentials do not share a rate-limit identity")
+	}
+	if original == key(t, "https://customer.ghe.com/enterprises/first", "fixture-pat") ||
+		original == key(t, "https://github.com/enterprises/first", "another-pat") {
+		t.Fatal("unrelated credentials share a rate-limit identity")
 	}
 }

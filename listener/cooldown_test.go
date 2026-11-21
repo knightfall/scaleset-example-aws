@@ -22,12 +22,12 @@ func TestCredentialCooldownIsSharedAcrossAliasesOfSameSecret(t *testing.T) {
 	}
 	lanes := (Supervisor{}).profileLanes(artifact, nil)
 	reset := time.Now().Add(5 * time.Second)
-	lanes[0].credentials.cooldown.record(&githubsets.RateLimitError{RetryAfter: time.Second, Reset: reset})
-	lanes[1].credentials.cooldown.record(&githubsets.RateLimitError{RetryAfter: 2 * time.Second})
-	if got := lanes[1].credentials.cooldown.deadline(); !got.Equal(reset) {
+	lanes[0].credentials.recordLimit(&githubsets.RateLimitError{RetryAfter: time.Second, Reset: reset})
+	lanes[1].credentials.recordLimit(&githubsets.RateLimitError{RetryAfter: 2 * time.Second})
+	if got := lanes[1].credentials.cooldownDeadline(); !got.Equal(reset) {
 		t.Fatalf("shared cooldown = %v, want %v", got, reset)
 	}
-	if got := lanes[2].credentials.cooldown.deadline(); !got.IsZero() {
+	if got := lanes[2].credentials.cooldownDeadline(); !got.IsZero() {
 		t.Fatalf("unrelated credential cooldown = %v", got)
 	}
 }

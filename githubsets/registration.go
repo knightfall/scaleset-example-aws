@@ -24,11 +24,18 @@ var (
 )
 
 type Connection struct {
-	VersionID  string
-	client     *scaleset.Client
-	deployment string
-	scope      string
-	profiles   []runtimeconfig.Profile
+	VersionID    string
+	client       *scaleset.Client
+	deployment   string
+	scope        string
+	profiles     []runtimeconfig.Profile
+	rateLimitKey [32]byte
+}
+
+// RateLimitKey identifies equivalent credentials across named connections.
+// Use it only to share in-memory cooldown state.
+func (c *Connection) RateLimitKey() [32]byte {
+	return c.rateLimitKey
 }
 
 type ScaleSet struct {

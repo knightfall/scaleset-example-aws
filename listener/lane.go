@@ -27,29 +27,52 @@ type credentialState struct {
 	mu         sync.Mutex
 	connection *githubsets.Connection
 	checkAt    time.Time
-	cooldown   *credentialCooldown
+	limits     *credentialLimits
+	cooldown   atomic.Pointer[credentialCooldown]
+}
+
+func (c *credentialState) cooldownDeadline() time.Time {
+	if cooldown := c.cooldown.Load(); cooldown != nil {
+		return cooldown.deadline()
+	}
+	return time.Time{}
+}
+
+func (c *credentialState) recordLimit(err error) {
+	if cooldown := c.cooldown.Load(); cooldown != nil {
+		cooldown.record(err)
+	}
 }
 
 func (c *credentialState) refresh(ctx context.Context, lane *profileLane, lease lifecycle.Lease) (*githubsets.Connection, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if time.Now().Before(c.checkAt) || time.Now().Before(c.cooldown.deadline()) {
+	if time.Now().Before(c.checkAt) || time.Now().Before(c.cooldownDeadline()) {
 		return c.connection, nil
 	}
 	s := lane.supervisor
 	request, cancel := boundedContext(ctx, lease.ValidUntil, s.Timing.OperationTimeout)
 	defer cancel()
 	candidate, err := s.Loader.Load(request, lane.artifact, lane.profile.GitHub.Connection)
-	if err == nil && c.connection != nil && c.connection.VersionID != candidate.VersionID {
-		err = candidate.Validate(request)
-	}
 	if err != nil {
-		c.cooldown.record(err)
 		c.checkAt = time.Now().Add(min(s.Timing.CredentialInterval, time.Second))
 		return c.connection, err
 	}
 	if c.connection == nil || c.connection.VersionID != candidate.VersionID {
+		limit := c.limits.forCredential(candidate.RateLimitKey())
+		if c.connection != nil {
+			if until := limit.deadline(); time.Now().Before(until) {
+				c.checkAt = until
+				return c.connection, nil
+			}
+			if err := candidate.Validate(request); err != nil {
+				limit.record(err)
+				c.checkAt = time.Now().Add(min(s.Timing.CredentialInterval, time.Second))
+				return c.connection, err
+			}
+		}
 		c.connection = candidate
+		c.cooldown.Store(limit)
 	}
 	c.checkAt = time.Now().Add(s.Timing.CredentialInterval)
 	return c.connection, nil
@@ -59,7 +82,7 @@ func (l *profileLane) run(ctx context.Context) error {
 	var retryAt time.Time
 	failures := 0
 	for {
-		deadline := l.credentials.cooldown.deadline()
+		deadline := l.credentials.cooldownDeadline()
 		if retryAt.After(deadline) {
 			deadline = retryAt
 		}
@@ -71,7 +94,7 @@ func (l *profileLane) run(ctx context.Context) error {
 			break
 		}
 		if err != nil {
-			l.credentials.cooldown.record(err)
+			l.credentials.recordLimit(err)
 			l.supervisor.Logger.Warn("profile listener retry", "profile", l.profile.ID, "error", err)
 			retryAt = time.Now().Add(retryDelay(failures))
 			failures = min(failures+1, 8)
@@ -121,12 +144,12 @@ func (l *profileLane) step(ctx context.Context) error {
 	if connection == nil && refreshErr == nil {
 		return errors.New("configured GitHub credential is temporarily unavailable")
 	}
-	if connection == nil || time.Now().Before(l.credentials.cooldown.deadline()) {
+	if connection == nil || time.Now().Before(l.credentials.cooldownDeadline()) {
 		return refreshErr
 	}
 
 	capacity := l.capacity(ctx, lease)
-	if time.Now().Before(l.credentials.cooldown.deadline()) {
+	if time.Now().Before(l.credentials.cooldownDeadline()) {
 		return nil
 	}
 	if l.session == nil || l.version != connection.VersionID {
@@ -139,7 +162,7 @@ func (l *profileLane) step(ctx context.Context) error {
 		pollTimeout: s.Timing.PollTimeout, operationTimeout: s.Timing.OperationTimeout,
 	}
 	return processor.step(ctx, lease, l.profile.ID, capacity, func(delivery context.Context, current lifecycle.Lease) *Capacity {
-		if time.Now().Before(l.credentials.cooldown.deadline()) {
+		if time.Now().Before(l.credentials.cooldownDeadline()) {
 			return nil
 		}
 		return l.capacity(delivery, current)
