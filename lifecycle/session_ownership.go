@@ -132,7 +132,7 @@ func (s *Store) BeginSessionOpen(ctx context.Context, lease Lease, profile strin
 
 func (s *Store) ConfirmSessionOpen(ctx context.Context, lease Lease, profile string, intent SessionOwnership, sessionID string, initial *DemandCounts, now time.Time) (SessionOwnership, error) {
 	if intent.Phase != SessionOpening || intent.ControllerID != lease.Owner || intent.Epoch != lease.Epoch ||
-		sessionID == "" || strings.Contains(sessionID, "#") || (initial != nil && !initial.valid()) {
+		sessionID == "" || strings.Contains(sessionID, "#") {
 		return SessionOwnership{}, ErrSessionChanged
 	}
 	current, err := s.SessionOwnership(ctx, lease.Deployment, profile)
@@ -287,7 +287,25 @@ func sessionChange(deployment, profile string, owner SessionOwnership) (Change, 
 }
 
 func (s *Store) sessionClaim(ctx context.Context, deployment, profile string, target SessionTarget) (Change, error) {
-	key := ClaimKey("github-set:" + target.Scope + "#" + strconv.Itoa(target.ScaleSetID))
+	identity := "github-set:" + target.Scope + "#" + strconv.Itoa(target.ScaleSetID)
+	return s.profileClaim(ctx, deployment, profile, identity)
+}
+
+// ClaimProfileResource reserves a canonical remote identity under the active
+// deployment lease before a caller can issue a provider request.
+func (s *Store) ClaimProfileResource(ctx context.Context, lease Lease, profile, identity string, now time.Time) error {
+	claim, err := s.profileClaim(ctx, lease.Deployment, profile, identity)
+	if err != nil {
+		return err
+	}
+	return s.ApplyFenced(ctx, lease, now, "", claim)
+}
+
+func (s *Store) profileClaim(ctx context.Context, deployment, profile, identity string) (Change, error) {
+	if deployment == "" || profile == "" || identity == "" {
+		return Change{}, errors.New("profile claim requires deployment, profile and identity")
+	}
+	key := ClaimKey(identity)
 	record, err := s.Get(ctx, key)
 	if err != nil {
 		return Change{}, err
@@ -296,7 +314,7 @@ func (s *Store) sessionClaim(ctx context.Context, deployment, profile string, ta
 	if record != nil {
 		var owner string
 		if record.Deployment != deployment || json.Unmarshal(record.Payload, &owner) != nil || owner != profile {
-			return Change{}, fmt.Errorf("%w: scale set is already claimed", ErrConflict)
+			return Change{}, fmt.Errorf("%w: resource is already claimed", ErrConflict)
 		}
 		revision = record.Revision
 	}

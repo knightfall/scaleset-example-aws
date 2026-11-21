@@ -144,13 +144,19 @@ func transactionError(err error, fenced bool) error {
 	if !ok {
 		return fmt.Errorf("commit lifecycle records: %w", err)
 	}
+	conflicting := false
 	for i, reason := range cancellation.CancellationReasons {
-		if aws.ToString(reason.Code) != "ConditionalCheckFailed" {
-			continue
+		switch aws.ToString(reason.Code) {
+		case "ConditionalCheckFailed":
+			if fenced && i == 0 {
+				return fmt.Errorf("%w: %w", ErrLeaseLost, err)
+			}
+			conflicting = true
+		case "TransactionConflict":
+			conflicting = true
 		}
-		if fenced && i == 0 {
-			return fmt.Errorf("%w: %w", ErrLeaseLost, err)
-		}
+	}
+	if conflicting {
 		return fmt.Errorf("%w: %w", ErrConflict, err)
 	}
 	return fmt.Errorf("commit lifecycle records: %w", err)

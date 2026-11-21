@@ -111,7 +111,7 @@ func (s *Store) BeginDeliverySession(ctx context.Context, lease Lease, profile, 
 
 func newSessionProgress(revision int64, session string, initial *DemandCounts, now time.Time) SessionProgress {
 	progress := SessionProgress{SessionID: session, revision: revision}
-	if initial != nil {
+	if initial != nil && initial.valid() {
 		progress.Demand = &DemandObservation{DemandCounts: *initial, ObservedAt: now.UTC()}
 	}
 	return progress
@@ -178,25 +178,29 @@ func (s *Store) PersistDelivery(ctx context.Context, lease Lease, profile, sessi
 	}
 	progress.PendingMessageID = delivery.MessageID
 	progress.PendingZeroMessage = delivery.MessageID == 0
-	changes := []Change{processed}
-	if delivery.Stats != nil && delivery.Stats.valid() {
-		progress.Demand = &DemandObservation{
-			DemandCounts: *delivery.Stats, ObservedAt: entry.ReceivedAt, MessageID: delivery.MessageID,
-		}
-		if delivery.Stats.Assigned > 0 {
-			accounted, err := s.accountedReservations(ctx, lease.Deployment, profile, entry.InboxMessage, jobs)
-			if err != nil {
-				return err
+	stats := delivery.Stats
+	if stats != nil {
+		// An inconsistent snapshot closes admission without dropping the job facts.
+		progress.Demand = nil
+		if stats.valid() {
+			progress.Demand = &DemandObservation{
+				DemandCounts: *stats, ObservedAt: entry.ReceivedAt, MessageID: delivery.MessageID,
 			}
-			changes = append(changes, accounted...)
 		}
 	}
-	return s.writeProgress(ctx, lease, profile, now, progress, changes...)
+	if stats == nil || progress.Demand == nil || stats.Assigned == 0 {
+		return s.writeProgress(ctx, lease, profile, now, progress, processed)
+	}
+	accounted, err := s.accountedReservations(ctx, lease.Deployment, profile, entry.InboxMessage, jobs)
+	if err != nil {
+		return err
+	}
+	return s.writeProgress(ctx, lease, profile, now, progress, append(accounted, processed)...)
 }
 
 func (d Delivery) validate() error {
-	if d.MessageID < 0 || (d.Stats != nil && !d.Stats.valid()) {
-		return errors.New("invalid delivery ID or demand observation")
+	if d.MessageID < 0 {
+		return errors.New("invalid delivery ID")
 	}
 	for _, id := range d.Offers {
 		if id <= 0 {
