@@ -27,10 +27,12 @@ type RunnerIdentity struct {
 // Executor stores verified identities and job observations. A completed job
 // alone provides no evidence that the executor can be stopped.
 type Executor struct {
-	Binding    ExecutorBinding `json:"binding"`
-	Runner     RunnerIdentity  `json:"runner,omitzero"`
-	Attempt    JobFact         `json:"attempt,omitzero"`
-	Conflicted bool            `json:"conflicted,omitempty"`
+	Binding    ExecutorBinding     `json:"binding"`
+	Runner     RunnerIdentity      `json:"runner,omitzero"`
+	Attempt    JobFact             `json:"attempt,omitzero"`
+	Resource   ResourceObservation `json:"resource,omitzero"`
+	Process    ProcessObservation  `json:"process,omitzero"`
+	Conflicted bool                `json:"conflicted,omitempty"`
 	revision   int64
 }
 
@@ -66,7 +68,9 @@ func (s *Store) Executor(ctx context.Context, deployment, profile, allocation st
 
 func (e Executor) valid(allocation string) bool {
 	if e.Binding.AllocationID != allocation || !e.Binding.valid() ||
-		(e.Runner != (RunnerIdentity{}) && !e.Runner.valid()) {
+		(e.Runner != (RunnerIdentity{}) && !e.Runner.valid()) ||
+		(e.Resource != (ResourceObservation{}) && !e.Resource.valid()) ||
+		(e.Process != (ProcessObservation{}) && (!e.Process.valid() || e.Process.Runner != e.Runner)) {
 		return false
 	}
 	return e.Attempt == (JobFact{}) || e.Attempt.RequestID > 0 && e.Runner.ID != 0 &&
