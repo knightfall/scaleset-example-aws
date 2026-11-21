@@ -28,7 +28,7 @@ type Timing struct {
 func DefaultTiming() Timing {
 	return Timing{
 		LeaseTTL: 5 * time.Minute, OperationTimeout: 30 * time.Second, PollTimeout: 150 * time.Second,
-		CredentialInterval: 5 * time.Minute, MaxDemandAge: 10 * time.Minute, ShutdownTimeout: 30 * time.Second,
+		CredentialInterval: 5 * time.Minute, MaxDemandAge: 10 * time.Minute, ShutdownTimeout: time.Minute,
 	}
 }
 
