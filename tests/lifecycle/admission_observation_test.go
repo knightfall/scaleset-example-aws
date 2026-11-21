@@ -1,8 +1,11 @@
 package lifecycle_test
 
 import (
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 
 	"github.com/knightfall/scaleset-example-aws/lifecycle"
 )
@@ -53,5 +56,54 @@ func TestAdmissionUsesRequestFactsAndContemporaneousStatistics(t *testing.T) {
 				t.Fatalf("decision = %+v, want Send=%t, error = %v", decision, tc.send, err)
 			}
 		})
+	}
+}
+
+func TestAccountingAndItsDemandSnapshotCommitTogether(t *testing.T) {
+	ctx := t.Context()
+	now := admissionTime
+	ledger, db, lease := admissionStore(t, now)
+	const profile, session = "build", "owned"
+	if err := ledger.BeginDeliverySession(ctx, lease, profile, "", session, &lifecycle.DemandCounts{}, now); err != nil {
+		t.Fatal(err)
+	}
+	first := offer(session, 1, 100, 101)
+	expectDecision(t, ledger, lease, first, true, false, 100, 101)
+	if err := ledger.RecordAdmissionOutcome(ctx, lease, profile, now, first.Message, []int64{100, 101}); err != nil {
+		t.Fatal(err)
+	}
+	interrupted := errors.New("fixture did not commit the demand transaction")
+	db.beforeWrite = func(input *dynamodb.TransactWriteItemsInput) error {
+		for _, item := range input.TransactItems {
+			if item.Put != nil && keyOf(item.Put.Item).SK == "DEMAND" {
+				return interrupted
+			}
+		}
+		return nil
+	}
+	delivery := lifecycle.Delivery{
+		MessageID: 2, Stats: &lifecycle.DemandCounts{Assigned: 1}, Offers: []int64{102},
+		Jobs: []lifecycle.JobFact{{RequestID: 100, Phase: lifecycle.JobAssigned}},
+	}
+	if err := ledger.PersistDelivery(ctx, lease, profile, session, now, delivery); !errors.Is(err, interrupted) {
+		t.Fatalf("interrupted delivery: %v", err)
+	}
+	if got := acquisitionState(t, ledger, 100); got != "accepted" {
+		t.Fatalf("reservation was released without durable demand: %q", got)
+	}
+	db.beforeWrite = nil
+	delivery.Stats = nil
+	if err := ledger.PersistDelivery(ctx, lease, profile, session, now, delivery); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := ledger.PendingDelivery(ctx, "dev", profile, session, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := ledger.ReserveAdmission(ctx, lease, profile, now, lifecycle.AdmissionOffer{
+		Message: pending.Receipt, RequestIDs: pending.Offers, EffectiveMax: 2,
+	})
+	if err != nil || decision.Send {
+		t.Fatalf("replay admitted extra work: %+v, error = %v", decision, err)
 	}
 }

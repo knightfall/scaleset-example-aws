@@ -164,10 +164,10 @@ func (s *Store) PersistDelivery(ctx context.Context, lease Lease, profile, sessi
 		jobs[fact.RequestID] = job
 	}
 	for _, job := range jobs {
-		if job.ConflictingRunner {
+		if job.ConflictingRunner || job.Phase != JobCompleted {
 			continue
 		}
-		if err := s.reconcileJobReservation(ctx, lease, profile, now, entry.InboxMessage, job.JobFact, delivery.Stats); err != nil {
+		if err := s.releaseCompletedRequest(ctx, lease, profile, now, entry.InboxMessage, job.JobFact); err != nil {
 			return err
 		}
 	}
@@ -178,12 +178,20 @@ func (s *Store) PersistDelivery(ctx context.Context, lease Lease, profile, sessi
 	}
 	progress.PendingMessageID = delivery.MessageID
 	progress.PendingZeroMessage = delivery.MessageID == 0
-	if delivery.Stats != nil {
+	changes := []Change{processed}
+	if delivery.Stats != nil && delivery.Stats.valid() {
 		progress.Demand = &DemandObservation{
 			DemandCounts: *delivery.Stats, ObservedAt: entry.ReceivedAt, MessageID: delivery.MessageID,
 		}
+		if delivery.Stats.Assigned > 0 {
+			accounted, err := s.accountedReservations(ctx, lease.Deployment, profile, entry.InboxMessage, jobs)
+			if err != nil {
+				return err
+			}
+			changes = append(changes, accounted...)
+		}
 	}
-	return s.writeProgress(ctx, lease, profile, now, progress, processed)
+	return s.writeProgress(ctx, lease, profile, now, progress, changes...)
 }
 
 func (d Delivery) validate() error {

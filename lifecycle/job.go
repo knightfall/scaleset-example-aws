@@ -91,41 +91,71 @@ func (j jobObservation) merge(fact JobFact) jobObservation {
 	return j
 }
 
-// Admission counts unreflected requests separately from the current assigned
-// total. Update only a request identified by the owned session's job facts.
-func (s *Store) reconcileJobReservation(
-	ctx context.Context, lease Lease, profile string, now time.Time, message InboxMessage, fact JobFact, stats *DemandCounts,
-) error {
-	var disposition string
-	switch fact.Phase {
-	case JobCompleted:
-		// A terminal queue event releases admission even when its wall clock
-		// differs from ours. Executor cleanup requires its own occupancy proof.
-		disposition = "terminal"
-	case JobAssigned, JobStarted:
-		if stats == nil || !stats.valid() || stats.Assigned == 0 {
-			return nil
-		}
-		// The same delivery supplies the identified assignment and a current
-		// assigned total. An aggregate change alone identifies no reservation.
-		disposition = "accounted"
-	default:
-		return nil
-	}
-	key := acquisitionKey(lease.Deployment, profile, fact.RequestID)
-	record, err := s.Get(ctx, key)
-	if err != nil || record == nil {
+// releaseCompletedRequest uses the owned session's terminal event even when
+// its time is absent or ahead of the local clock. Executor cleanup needs its own proof.
+func (s *Store) releaseCompletedRequest(ctx context.Context, lease Lease, profile string, now time.Time, message InboxMessage, fact JobFact) error {
+	reservation, _, err := s.jobReservation(ctx, lease.Deployment, profile, fact.RequestID)
+	if err != nil || !reservation.counted() {
 		return err
 	}
-	var reservation admissionReservation
-	if err := json.Unmarshal(record.Payload, &reservation); err != nil || reservation.RequestID != fact.RequestID || reservation.InboxKey == "" {
-		return errors.New("invalid durable acquisition for completed request")
-	}
-	if reservation.State == "accounted" || reservation.State == "terminal" || reservation.State == "unstarted" {
-		return nil
-	}
 	return s.ReleaseAdmission(ctx, lease, profile, now, AcquisitionEvidence{
-		RequestID: fact.RequestID, State: disposition,
-		Reference: fmt.Sprintf("%s:%s:%d:%d", fact.Phase, message.SessionID, message.MessageID, fact.RequestID),
+		RequestID: fact.RequestID, State: "terminal",
+		Reference: fmt.Sprintf("completed:%s:%d:%d", message.SessionID, message.MessageID, fact.RequestID),
 	})
+}
+
+func (s *Store) jobReservation(ctx context.Context, deployment, profile string, requestID int64) (admissionReservation, int64, error) {
+	record, err := s.Get(ctx, acquisitionKey(deployment, profile, requestID))
+	if err != nil || record == nil {
+		return admissionReservation{}, 0, err
+	}
+	reservation, err := decodeAcquisition(record, requestID)
+	return reservation, record.Revision, err
+}
+
+func (r admissionReservation) counted() bool {
+	switch r.State {
+	case "pending", "uncertain", "accepted":
+		return true
+	default:
+		return false
+	}
+}
+
+// The accounting changes must commit with the same delivery's demand
+// observation. Until then the previous snapshot may still be in use.
+func (s *Store) accountedReservations(ctx context.Context, deployment, profile string, message InboxMessage, jobs map[int64]jobObservation) ([]Change, error) {
+	// Leave room for the lease fence, inbox, demand snapshot and budget.
+	const maxAccounted = 96
+	changes := make([]Change, 0, min(len(jobs), maxAccounted))
+	for id, job := range jobs {
+		if len(changes) == maxAccounted {
+			break
+		}
+		if job.ConflictingRunner || (job.Phase != JobAssigned && job.Phase != JobStarted) {
+			continue
+		}
+		reservation, revision, err := s.jobReservation(ctx, deployment, profile, id)
+		if err != nil {
+			return nil, err
+		}
+		if !reservation.counted() {
+			continue
+		}
+		reservation.State = "accounted"
+		reservation.DecisionRef = fmt.Sprintf("%s:%s:%d:%d", job.Phase, message.SessionID, message.MessageID, id)
+		change, err := admissionChange(deployment, acquisitionKey(deployment, profile, id), revision, reservation)
+		if err != nil {
+			return nil, err
+		}
+		changes = append(changes, change)
+	}
+	if len(changes) == 0 {
+		return nil, nil
+	}
+	budget, err := s.releaseAdmissionBudget(ctx, deployment, profile, len(changes))
+	if err != nil {
+		return nil, err
+	}
+	return append(changes, budget), nil
 }
