@@ -37,10 +37,9 @@ func (s *Session) Poll(ctx context.Context, cursor int64, capacity int) (*lifecy
 	if cursor < 0 || int64(int(cursor)) != cursor || capacity < 0 {
 		return nil, errors.New("invalid GitHub message cursor or capacity")
 	}
-	ctx, status := trackResponseStatus(ctx)
 	message, err := s.client.GetMessage(ctx, int(cursor), capacity)
 	if err != nil {
-		return nil, requestError("poll GitHub scale set", status.Load(), err)
+		return nil, requestError("poll GitHub scale set", err)
 	}
 	if message == nil {
 		return nil, nil
@@ -49,11 +48,10 @@ func (s *Session) Poll(ctx context.Context, cursor int64, capacity int) (*lifecy
 }
 
 func (s *Session) Acquire(ctx context.Context, ids []int64) ([]int64, error) {
-	ctx, status := trackResponseStatus(ctx)
 	ctx = oneWriteAttempt(ctx)
 	accepted, err := s.client.AcquireJobs(ctx, ids)
 	if err != nil {
-		return nil, requestError("acquire GitHub jobs", status.Load(), err)
+		return nil, requestError("acquire GitHub jobs", err)
 	}
 	return accepted, nil
 }
@@ -62,17 +60,10 @@ func (s *Session) Acknowledge(ctx context.Context, messageID int64) error {
 	if messageID < 0 || int64(int(messageID)) != messageID {
 		return errors.New("invalid GitHub message ID")
 	}
-	ctx, status := trackResponseStatus(ctx)
 	if err := s.client.DeleteMessage(oneWriteAttempt(ctx), int(messageID)); err != nil {
-		return requestError("acknowledge GitHub delivery", status.Load(), err)
+		return requestError("acknowledge GitHub delivery", err)
 	}
 	return nil
-}
-
-func oneWriteAttempt(ctx context.Context) context.Context {
-	return scaleset.WithRequestRetry(ctx, func(retry *scaleset.RetryConfig) {
-		retry.Max = 0
-	})
 }
 
 func translateDelivery(message *scaleset.RunnerScaleSetMessage) (*lifecycle.Delivery, error) {

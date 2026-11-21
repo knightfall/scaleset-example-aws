@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -27,11 +28,33 @@ type RateLimitError struct {
 func (e *RateLimitError) Error() string { return ErrRateLimited.Error() }
 func (e *RateLimitError) Unwrap() error { return ErrRateLimited }
 
-type responseStatusKey struct{}
+type credentialRetryKey struct{}
 
-func trackResponseStatus(ctx context.Context) (context.Context, *atomic.Int32) {
-	status := &atomic.Int32{}
-	return context.WithValue(ctx, responseStatusKey{}, status), status
+func oneWriteAttempt(ctx context.Context) context.Context {
+	credentialRequest := &atomic.Bool{}
+	ctx = context.WithValue(ctx, credentialRetryKey{}, credentialRequest)
+	return scaleset.WithRequestRetry(ctx, func(retry *scaleset.RetryConfig) {
+		shouldRetry := retry.ShouldRetry
+		if shouldRetry == nil {
+			shouldRetry = scaleset.DefaultShouldRetry
+		}
+		onRateLimit := retry.OnRateLimit
+		if onRateLimit == nil {
+			onRateLimit = scaleset.DefaultOnRateLimit
+		}
+		retry.ShouldRetry = func(ctx context.Context, response *http.Response, err error) (bool, error) {
+			if !credentialRequest.Load() {
+				return false, nil
+			}
+			return shouldRetry(ctx, response, err)
+		}
+		retry.OnRateLimit = func(ctx context.Context, limit *scaleset.RateLimitError) (time.Duration, bool) {
+			if !credentialRequest.Load() {
+				return 0, false
+			}
+			return onRateLimit(ctx, limit)
+		}
+	})
 }
 
 type githubTransport struct {
@@ -42,14 +65,25 @@ func (t githubTransport) RoundTrip(request *http.Request) (*http.Response, error
 	if request.URL.Scheme != "https" || request.URL.User != nil {
 		return nil, errors.New("GitHub requests require HTTPS without URL credentials")
 	}
-	response, err := t.next.RoundTrip(request)
-	if status, ok := request.Context().Value(responseStatusKey{}).(*atomic.Int32); ok {
-		status.Store(0)
-		if response != nil {
-			status.Store(int32(response.StatusCode))
-		}
+	if credentialRequest, ok := request.Context().Value(credentialRetryKey{}).(*atomic.Bool); ok {
+		credentialRequest.Store(isCredentialExchange(request))
 	}
-	return response, err
+	return t.next.RoundTrip(request)
+}
+
+// The SDK can exchange credentials while building a mutation. Keep normal
+// retries for those exchanges, and default all unrecognized requests to one attempt.
+func isCredentialExchange(request *http.Request) bool {
+	path := request.URL.Path
+	if request.Method == http.MethodPatch {
+		return strings.Contains(path, "/_apis/runtime/runnerscalesets/") && strings.Contains(path, "/sessions/")
+	}
+	if request.Method != http.MethodPost {
+		return false
+	}
+	return strings.HasSuffix(path, "/actions/runner-registration") ||
+		strings.HasSuffix(path, "/actions/runners/registration-token") ||
+		(strings.Contains(path, "/app/installations/") && strings.HasSuffix(path, "/access_tokens"))
 }
 
 func githubHTTPClient(caBundle string, wrap func(http.RoundTripper) http.RoundTripper) (*http.Client, error) {
@@ -80,7 +114,11 @@ func githubHTTPClient(caBundle string, wrap func(http.RoundTripper) http.RoundTr
 	return client, nil
 }
 
-func requestError(operation string, status int32, err error) error {
+func requestError(operation string, err error) error {
+	var status int
+	if response, ok := errors.AsType[*scaleset.RequestResponseError](err); ok && response.Response != nil {
+		status = response.Response.StatusCode
+	}
 	// SDK errors can include response bodies, headers or credential-bearing URLs.
 	var reason error
 	switch limit, ok := errors.AsType[*scaleset.RateLimitError](err); {

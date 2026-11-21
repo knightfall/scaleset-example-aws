@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -146,11 +147,9 @@ func (c *Connection) creationDigest(parameters scaleset.RunnerScaleSet) (string,
 func (c *Connection) createAndConfirm(
 	ctx context.Context, journal *lifecycle.Store, request CreateRequest, binding runtimeconfig.GitHubBinding, parameters scaleset.RunnerScaleSet,
 ) (ScaleSet, error) {
-	createCtx, status := trackResponseStatus(ctx)
-	createCtx = oneWriteAttempt(createCtx)
-	created, err := c.client.CreateRunnerScaleSet(createCtx, &parameters)
+	created, err := c.client.CreateRunnerScaleSet(oneWriteAttempt(ctx), &parameters)
 	if err != nil {
-		return ScaleSet{}, fmt.Errorf("%w: %w", ErrCreateUnconfirmed, requestError("create scale set", status.Load(), err))
+		return ScaleSet{}, fmt.Errorf("%w: %w", ErrCreateUnconfirmed, requestError("create scale set", err))
 	}
 	confirmed, err := c.lookupSet(ctx, binding, parameters.RunnerGroupID)
 	if err != nil {
@@ -176,10 +175,20 @@ func (c *Connection) profile(id string) (runtimeconfig.Profile, error) {
 }
 
 func (c *Connection) lookup(ctx context.Context, binding runtimeconfig.GitHubBinding) (ScaleSet, error) {
-	groupCtx, status := trackResponseStatus(ctx)
-	group, err := c.client.GetRunnerGroupByName(groupCtx, binding.RunnerGroup)
+	scope, err := url.Parse(c.scope)
 	if err != nil {
-		return ScaleSet{}, requestError("resolve runner group", status.Load(), err)
+		return ScaleSet{}, ErrRegistrationDrift
+	}
+	owner, repo, _ := strings.Cut(strings.TrimPrefix(scope.Path, "/"), "/")
+	if repo != "" && owner != "enterprises" {
+		if !strings.EqualFold(binding.RunnerGroup, scaleset.DefaultRunnerGroup) {
+			return ScaleSet{}, ErrRegistrationDrift
+		}
+		return c.lookupSet(ctx, binding, 1)
+	}
+	group, err := c.client.GetRunnerGroupByName(ctx, binding.RunnerGroup)
+	if err != nil {
+		return ScaleSet{}, requestError("resolve runner group", err)
 	}
 	if group == nil || group.ID <= 0 || !strings.EqualFold(group.Name, binding.RunnerGroup) {
 		return ScaleSet{}, ErrRegistrationDrift
@@ -188,10 +197,9 @@ func (c *Connection) lookup(ctx context.Context, binding runtimeconfig.GitHubBin
 }
 
 func (c *Connection) lookupSet(ctx context.Context, binding runtimeconfig.GitHubBinding, groupID int) (ScaleSet, error) {
-	setCtx, status := trackResponseStatus(ctx)
-	set, err := c.client.GetRunnerScaleSet(setCtx, groupID, binding.ScaleSet)
+	set, err := c.client.GetRunnerScaleSet(ctx, groupID, binding.ScaleSet)
 	if err != nil {
-		return ScaleSet{}, requestError("resolve scale set", status.Load(), err)
+		return ScaleSet{}, requestError("resolve scale set", err)
 	}
 	if set == nil {
 		return ScaleSet{GroupID: groupID}, ErrScaleSetMissing

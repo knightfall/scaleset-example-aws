@@ -143,10 +143,16 @@ func TestConfiguredGitHubAppUsesInstallationAndRepositoryScope(t *testing.T) {
 			}},
 		registrationExchange(t, "api.github.com", "/repos/example/build/actions/runners/registration-token", "Bearer installation-fixture"),
 		adminExchange(t, "api.github.com", "/actions/runner-registration", scope),
-		groupLookup(t), setLookup(t, matchingSetResponse),
+		exchange{method: "GET", path: scaleSetPath, status: http.StatusOK,
+			response: strings.Replace(matchingSetResponse, `"runnerGroupId":19`, `"runnerGroupId":1`, 1),
+			check: func(r *http.Request) {
+				checkValue(t, "repository default group", r.URL.Query().Get("runnerGroupId"), "1")
+			}},
 	)
 	loader := credentialLoader(newScript(t, secretExchange(t, "app-v1", string(document))), github)
-	connection, err := loader.Load(t.Context(), credentialArtifact("github-app", scope), "build")
+	artifact := credentialArtifact("github-app", scope)
+	artifact.Config.Spec.Profiles[0].GitHub.RunnerGroup = "default"
+	connection, err := loader.Load(t.Context(), artifact, "build")
 	if err != nil {
 		t.Fatal(err)
 	}
