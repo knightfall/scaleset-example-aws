@@ -79,23 +79,14 @@ func (c *Connection) Create(ctx context.Context, journal *lifecycle.Store, reque
 	if !errors.Is(err, ErrScaleSetMissing) {
 		return resolved, err
 	}
-	parameters := scaleset.RunnerScaleSet{
-		Name: binding.ScaleSet, RunnerGroupID: resolved.GroupID,
-		RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
-	}
-	for _, label := range binding.Labels {
-		parameters.Labels = append(parameters.Labels, scaleset.Label{Name: label, Type: "System"})
-	}
-	payload, err := json.Marshal(struct {
-		Scope string
-		Set   scaleset.RunnerScaleSet
-	}{Scope: c.scope, Set: parameters})
+	parameters := creationParameters(binding, resolved.GroupID)
+	digest, err := c.creationDigest(parameters)
 	if err != nil {
-		return ScaleSet{}, fmt.Errorf("encode scale set creation intent: %w", err)
+		return ScaleSet{}, err
 	}
 	effect := lifecycle.Effect{
 		ID: request.EffectID, Kind: "create-scale-set", Target: c.scope,
-		RequestSHA256: fmt.Sprintf("%x", sha256.Sum256(payload)), Deadline: deadline,
+		RequestSHA256: digest, Deadline: deadline,
 	}
 	if _, err := journal.PlanEffect(ctx, request.Lease, profile.ID, effect, time.Now()); err != nil {
 		return ScaleSet{}, err
@@ -104,6 +95,52 @@ func (c *Connection) Create(ctx context.Context, journal *lifecycle.Store, reque
 		return ScaleSet{}, err
 	}
 	return c.createAndConfirm(ctx, journal, request, binding, parameters)
+}
+
+// VerifyCreationReadback matches the observed set to the original request
+// before the caller resolves an ambiguous create effect.
+func (c *Connection) VerifyCreationReadback(ctx context.Context, profileID string, effect lifecycle.Effect) (ScaleSet, error) {
+	if effect.Kind != "create-scale-set" || effect.Target != c.scope {
+		return ScaleSet{}, ErrRegistrationDrift
+	}
+	profile, err := c.profile(profileID)
+	if err != nil {
+		return ScaleSet{}, err
+	}
+	set, err := c.lookup(ctx, profile.GitHub)
+	if err != nil {
+		return ScaleSet{}, err
+	}
+	digest, err := c.creationDigest(creationParameters(profile.GitHub, set.GroupID))
+	if err != nil {
+		return ScaleSet{}, err
+	}
+	if digest != effect.RequestSHA256 {
+		return ScaleSet{}, ErrRegistrationDrift
+	}
+	return set, nil
+}
+
+func creationParameters(binding runtimeconfig.GitHubBinding, groupID int) scaleset.RunnerScaleSet {
+	parameters := scaleset.RunnerScaleSet{
+		Name: binding.ScaleSet, RunnerGroupID: groupID,
+		RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true},
+	}
+	for _, label := range binding.Labels {
+		parameters.Labels = append(parameters.Labels, scaleset.Label{Name: label, Type: "System"})
+	}
+	return parameters
+}
+
+func (c *Connection) creationDigest(parameters scaleset.RunnerScaleSet) (string, error) {
+	payload, err := json.Marshal(struct {
+		Scope string
+		Set   scaleset.RunnerScaleSet
+	}{Scope: c.scope, Set: parameters})
+	if err != nil {
+		return "", fmt.Errorf("encode scale set creation intent: %w", err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(payload)), nil
 }
 
 func (c *Connection) createAndConfirm(

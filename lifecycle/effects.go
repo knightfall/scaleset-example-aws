@@ -9,6 +9,10 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 const (
@@ -162,4 +166,56 @@ func (e Effect) change(deployment, profile string, due time.Time) (Change, error
 		},
 		ExpectedRevision: e.Revision,
 	}, nil
+}
+
+// ProfileEffectsSettled checks every effect for this profile on the base table.
+// The due index can omit a recent write or an intent whose deadline has not arrived.
+func (s *Store) ProfileEffectsSettled(ctx context.Context, deployment, profile string) (bool, error) {
+	if deployment == "" || profile == "" {
+		return false, errors.New("effect inspection requires deployment and profile")
+	}
+	pk := ProfileKey(deployment, profile, "").PK
+	input := &dynamodb.QueryInput{
+		TableName: aws.String(s.table), ConsistentRead: aws.Bool(true), Limit: aws.Int32(100),
+		KeyConditionExpression: aws.String("PK = :pk AND begins_with(SK, :prefix)"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":pk": text(pk), ":prefix": text("OP#"),
+		},
+	}
+	for {
+		page, err := s.db.Query(ctx, input)
+		if err != nil {
+			return false, fmt.Errorf("read profile effects: %w", err)
+		}
+		for _, item := range page.Items {
+			settled, err := settledEffect(item, deployment, pk)
+			if err != nil || !settled {
+				return false, err
+			}
+		}
+		if len(page.LastEvaluatedKey) == 0 {
+			return true, nil
+		}
+		input.ExclusiveStartKey = page.LastEvaluatedKey
+	}
+}
+
+func settledEffect(item map[string]types.AttributeValue, deployment, partition string) (bool, error) {
+	record, err := readRecord(item)
+	if err != nil {
+		return false, err
+	}
+	var effect Effect
+	if record.Deployment != deployment || record.Key.PK != partition ||
+		json.Unmarshal(record.Payload, &effect) != nil || effect.ID == "" || record.Key.SK != "OP#"+effect.ID {
+		return false, errors.New("invalid durable profile effect")
+	}
+	switch effect.State {
+	case EffectConfirmed, EffectAbandoned:
+		return effect.Evidence != "", nil
+	case EffectPlanned, EffectExecuting, EffectUncertain:
+		return false, nil
+	default:
+		return false, errors.New("invalid durable effect state")
+	}
 }
