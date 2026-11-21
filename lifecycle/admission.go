@@ -16,6 +16,11 @@ import (
 // A DynamoDB transaction also needs the lease, inbox, and budget operations.
 const maxAdmissionBatch = 97
 
+const (
+	admissionPlanned   = "planned"
+	admissionExecuting = "executing"
+)
+
 type AdmissionOffer struct {
 	Message      InboxMessage
 	RequestIDs   []int64
@@ -48,6 +53,7 @@ type admissionBatch struct {
 	RequestIDs      []int64 `json:"requestIds"`
 	AcceptedIDs     []int64 `json:"acceptedIds,omitempty"`
 	OutcomeRecorded bool    `json:"outcomeRecorded"`
+	DispatchPhase   string  `json:"dispatchPhase,omitempty"`
 }
 
 type admissionReservation struct {
@@ -58,7 +64,8 @@ type admissionReservation struct {
 
 // ReserveAdmission atomically records one delivery's decision and reserves its
 // request IDs. Send is true only for the caller that committed new reservations.
-// A replay may record uncertainty but must never send the same batch again.
+// BeginAdmissionDispatch must commit before calling GitHub. A replay may
+// cancel a batch still planned, or record uncertainty after dispatch began.
 func (s *Store) ReserveAdmission(ctx context.Context, lease Lease, profile string, now time.Time, offer AdmissionOffer) (AdmissionDecision, error) {
 	message, err := normalizeInbox(offer.Message)
 	if err != nil || lease.Deployment == "" || profile == "" {
@@ -94,11 +101,18 @@ func (s *Store) ReserveAdmission(ctx context.Context, lease Lease, profile strin
 	remaining := max(0, offer.EffectiveMax-offer.Assigned)
 	remaining -= min(remaining, offer.OutsideAssigned)
 	remaining -= min(remaining, reserved)
-	ids, err := s.availableRequests(ctx, lease.Deployment, profile, offer.RequestIDs, min(remaining, maxAdmissionBatch))
+	candidates, err := s.availableRequests(ctx, lease.Deployment, profile, offer.RequestIDs, min(remaining, maxAdmissionBatch))
 	if err != nil {
 		return AdmissionDecision{}, err
 	}
+	ids := make([]int64, 0, len(candidates))
+	for _, candidate := range candidates {
+		ids = append(ids, candidate.id)
+	}
 	entry.Admission = &admissionBatch{RequestIDs: ids, OutcomeRecorded: len(ids) == 0}
+	if len(ids) > 0 {
+		entry.Admission.DispatchPhase = admissionPlanned
+	}
 	messageKey := inboxKey(lease.Deployment, profile, message)
 	inbox, err := admissionChange(lease.Deployment, messageKey, inboxRevision, entry)
 	if err != nil {
@@ -109,12 +123,13 @@ func (s *Store) ReserveAdmission(ctx context.Context, lease Lease, profile strin
 		return AdmissionDecision{}, err
 	}
 	changes := []Change{inbox, budget}
-	for _, id := range ids {
-		reservation := admissionReservation{Acquisition: Acquisition{RequestID: id, State: "pending"}, InboxKey: messageKey.SK}
-		change, err := admissionChange(lease.Deployment, acquisitionKey(lease.Deployment, profile, id), 0, reservation)
+	for _, candidate := range candidates {
+		reservation := admissionReservation{Acquisition: Acquisition{RequestID: candidate.id, State: "pending"}, InboxKey: messageKey.SK}
+		change, err := admissionChange(lease.Deployment, acquisitionKey(lease.Deployment, profile, candidate.id), candidate.revision, reservation)
 		if err != nil {
 			return AdmissionDecision{}, err
 		}
+		change.Record.DueAt = now
 		changes = append(changes, change)
 	}
 	if err := s.ApplyFenced(ctx, lease, now, "", changes...); err != nil {
@@ -123,11 +138,16 @@ func (s *Store) ReserveAdmission(ctx context.Context, lease Lease, profile strin
 	return AdmissionDecision{RequestIDs: ids, Send: len(ids) > 0, OutcomeRecorded: len(ids) == 0}, nil
 }
 
-func (s *Store) availableRequests(ctx context.Context, deployment, profile string, offered []int64, limit int) ([]int64, error) {
-	ids := make([]int64, 0, min(len(offered), limit))
+type admissionCandidate struct {
+	id       int64
+	revision int64
+}
+
+func (s *Store) availableRequests(ctx context.Context, deployment, profile string, offered []int64, limit int) ([]admissionCandidate, error) {
+	candidates := make([]admissionCandidate, 0, min(len(offered), limit))
 	seen := make(map[int64]bool)
 	for _, id := range offered {
-		if len(ids) == limit {
+		if len(candidates) == limit {
 			break
 		}
 		if seen[id] {
@@ -138,18 +158,97 @@ func (s *Store) availableRequests(ctx context.Context, deployment, profile strin
 		if err != nil {
 			return nil, err
 		}
+		candidate := admissionCandidate{id: id}
 		if record != nil {
-			continue
+			reservation, err := decodeAcquisition(record, id)
+			if err != nil {
+				return nil, err
+			}
+			if reservation.State != "unstarted" {
+				continue
+			}
+			candidate.revision = record.Revision
 		}
 		job, err := s.Get(ctx, jobKey(deployment, profile, id))
 		if err != nil {
 			return nil, err
 		}
 		if job == nil {
-			ids = append(ids, id)
+			candidates = append(candidates, candidate)
 		}
 	}
-	return ids, nil
+	return candidates, nil
+}
+
+// BeginAdmissionDispatch records the dispatch boundary before an Acquire call.
+func (s *Store) BeginAdmissionDispatch(ctx context.Context, lease Lease, profile string, now time.Time, message InboxMessage) error {
+	entry, revision, err := s.readInbox(ctx, lease.Deployment, profile, message)
+	if err != nil {
+		return err
+	}
+	if entry.Admission == nil || entry.Admission.OutcomeRecorded || entry.Admission.DispatchPhase != admissionPlanned {
+		return ErrEffectNotReady
+	}
+	entry.Admission.DispatchPhase = admissionExecuting
+	change, err := admissionChange(lease.Deployment, inboxKey(lease.Deployment, profile, message), revision, entry)
+	if err != nil {
+		return err
+	}
+	return s.ApplyFenced(ctx, lease, now, "", change)
+}
+
+// CancelUnstartedAdmission releases the capacity only when the dispatch
+// boundary was never crossed. Older batches without that evidence stay reserved.
+func (s *Store) CancelUnstartedAdmission(ctx context.Context, lease Lease, profile string, now time.Time, message InboxMessage) (bool, error) {
+	entry, revision, err := s.readInbox(ctx, lease.Deployment, profile, message)
+	if err != nil {
+		return false, err
+	}
+	if entry.Admission == nil || entry.Admission.OutcomeRecorded || entry.Admission.DispatchPhase != admissionPlanned {
+		return false, nil
+	}
+	entry.Admission.OutcomeRecorded = true
+	key := inboxKey(lease.Deployment, profile, message)
+	inbox, err := admissionChange(lease.Deployment, key, revision, entry)
+	if err != nil {
+		return false, err
+	}
+	changes := []Change{inbox}
+	cancelled := 0
+	for _, id := range entry.Admission.RequestIDs {
+		reservation, revision, err := s.readAcquisition(ctx, lease.Deployment, profile, id)
+		if err != nil {
+			return false, err
+		}
+		if reservation.InboxKey != key.SK {
+			return false, errors.New("durable acquisition belongs to another delivery")
+		}
+		switch reservation.State {
+		case "terminal", "accounted":
+			continue
+		case "pending":
+			reservation.State = "unstarted"
+		default:
+			return false, errors.New("planned batch contains a dispatched acquisition")
+		}
+		change, err := admissionChange(lease.Deployment, acquisitionKey(lease.Deployment, profile, id), revision, reservation)
+		if err != nil {
+			return false, err
+		}
+		changes = append(changes, change)
+		cancelled++
+	}
+	if cancelled > 0 {
+		budget, err := s.releaseAdmissionBudget(ctx, lease.Deployment, profile, cancelled)
+		if err != nil {
+			return false, err
+		}
+		changes = append(changes, budget)
+	}
+	if err := s.applyOwned(ctx, lease, now, "", changes...); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // RecordAdmissionOutcome persists the confirmed subset of a batch. Every
@@ -205,6 +304,7 @@ func (s *Store) RecordAdmissionOutcome(ctx context.Context, lease Lease, profile
 		if err != nil {
 			return err
 		}
+		change.Record.DueAt = now
 		changes = append(changes, change)
 	}
 	return s.applyOwned(ctx, lease, now, "", changes...)
@@ -230,21 +330,16 @@ func (s *Store) ReleaseAdmission(ctx context.Context, lease Lease, profile strin
 	if err != nil {
 		return err
 	}
+	if current.State == "unstarted" {
+		return ErrEffectNotReady
+	}
 	if current.State == "accounted" || current.State == "terminal" {
 		if current.State != evidence.State || current.DecisionRef != evidence.Reference {
 			return fmt.Errorf("%w: acquisition disposition differs", ErrConflict)
 		}
 		return nil
 	}
-	budgetKey := ProfileKey(lease.Deployment, profile, "ADMISSION")
-	count, budgetRevision, err := s.readAdmissionCount(ctx, budgetKey)
-	if err != nil {
-		return err
-	}
-	if count == 0 {
-		return errors.New("admission budget is missing a reservation")
-	}
-	budget, err := admissionChange(lease.Deployment, budgetKey, budgetRevision, count-1)
+	budget, err := s.releaseAdmissionBudget(ctx, lease.Deployment, profile, 1)
 	if err != nil {
 		return err
 	}
@@ -258,20 +353,40 @@ func (s *Store) ReleaseAdmission(ctx context.Context, lease Lease, profile strin
 	return s.applyOwned(ctx, lease, now, "", budget, reservation)
 }
 
+func (s *Store) releaseAdmissionBudget(ctx context.Context, deployment, profile string, released int) (Change, error) {
+	key := ProfileKey(deployment, profile, "ADMISSION")
+	count, revision, err := s.readAdmissionCount(ctx, key)
+	if err != nil {
+		return Change{}, err
+	}
+	if count < released {
+		return Change{}, errors.New("admission budget is missing a reservation")
+	}
+	return admissionChange(deployment, key, revision, count-released)
+}
+
 func (s *Store) readAcquisition(ctx context.Context, deployment, profile string, id int64) (admissionReservation, int64, error) {
-	var acquisition admissionReservation
 	record, err := s.Get(ctx, acquisitionKey(deployment, profile, id))
 	if err != nil {
-		return acquisition, 0, err
+		return admissionReservation{}, 0, err
 	}
+	acquisition, err := decodeAcquisition(record, id)
+	if err != nil {
+		return admissionReservation{}, 0, err
+	}
+	return acquisition, record.Revision, nil
+}
+
+func decodeAcquisition(record *Record, id int64) (admissionReservation, error) {
+	var acquisition admissionReservation
 	if record == nil || json.Unmarshal(record.Payload, &acquisition) != nil || acquisition.RequestID != id || acquisition.InboxKey == "" {
-		return admissionReservation{}, 0, errors.New("invalid or missing durable acquisition")
+		return admissionReservation{}, errors.New("invalid or missing durable acquisition")
 	}
 	switch acquisition.State {
-	case "pending", "uncertain", "accepted", "accounted", "terminal":
-		return acquisition, record.Revision, nil
+	case "pending", "uncertain", "accepted", "accounted", "terminal", "unstarted":
+		return acquisition, nil
 	default:
-		return admissionReservation{}, 0, errors.New("invalid durable acquisition state")
+		return admissionReservation{}, errors.New("invalid durable acquisition state")
 	}
 }
 

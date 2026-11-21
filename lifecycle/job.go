@@ -106,7 +106,7 @@ func (s *Store) releaseCompletedRequest(ctx context.Context, lease Lease, profil
 	if err := json.Unmarshal(record.Payload, &reservation); err != nil || reservation.RequestID != fact.RequestID || reservation.InboxKey == "" {
 		return errors.New("invalid durable acquisition for completed request")
 	}
-	if reservation.State == "accounted" || reservation.State == "terminal" {
+	if reservation.State == "accounted" || reservation.State == "terminal" || reservation.State == "unstarted" {
 		return nil
 	}
 	return s.ReleaseAdmission(ctx, lease, profile, now, AcquisitionEvidence{

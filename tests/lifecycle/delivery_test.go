@@ -116,6 +116,12 @@ func TestDeliveryProcessorResumesAcknowledgementWithoutReacquiring(t *testing.T)
 	if err := processor.Step(ctx, lease, "build", capacity); !errors.Is(err, lostAcquire) {
 		t.Fatalf("lost acquisition = %v", err)
 	}
+	if !slices.Equal(acks, []int64{1, 1, 2}) {
+		t.Fatalf("acknowledged before backing off after acquisition error: %v", acks)
+	}
+	if err := processor.Step(ctx, lease, "build", capacity); err != nil {
+		t.Fatalf("acknowledgement after acquisition error: %v", err)
+	}
 	progress, err := ledger.SessionProgress(ctx, "dev", "build")
 	if err != nil || progress.LastAcknowledged != 3 || progress.PendingMessageID != 0 ||
 		progress.Demand == nil || progress.Demand.Assigned != 1 || progress.Demand.MessageID != 3 ||

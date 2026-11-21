@@ -121,23 +121,38 @@ func (p Processor) finish(ctx context.Context, lease lifecycle.Lease, profile st
 	if err != nil {
 		return err
 	}
-	var acquisitionErr error
 	if !decision.OutcomeRecorded {
-		var accepted []int64
-		if decision.Send {
-			accepted, acquisitionErr = p.Session.Acquire(ctx, decision.RequestIDs)
-			if acquisitionErr != nil {
-				accepted = nil
-			}
-		}
-		if p.Session.ID() != progress.SessionID {
-			return lifecycle.ErrSessionChanged
-		}
-		if err := p.Store.RecordAdmissionOutcome(ctx, lease, profile, time.Now(), pending.Receipt, accepted); err != nil {
-			return errors.Join(acquisitionErr, err)
+		if err := p.completeAdmission(ctx, lease, profile, progress, pending.Receipt, decision); err != nil {
+			return err
 		}
 	}
-	err = p.acknowledge(ctx, lease, profile, progress)
+	return p.acknowledge(ctx, lease, profile, progress)
+}
+
+func (p Processor) completeAdmission(
+	ctx context.Context, lease lifecycle.Lease, profile string, progress lifecycle.SessionProgress,
+	message lifecycle.InboxMessage, decision lifecycle.AdmissionDecision,
+) error {
+	if !decision.Send {
+		cancelled, err := p.Store.CancelUnstartedAdmission(ctx, lease, profile, time.Now(), message)
+		if err != nil || cancelled {
+			return err
+		}
+		return p.Store.RecordAdmissionOutcome(ctx, lease, profile, time.Now(), message, nil)
+	}
+	if err := p.Store.BeginAdmissionDispatch(ctx, lease, profile, time.Now(), message); err != nil {
+		return err
+	}
+	accepted, acquisitionErr := p.Session.Acquire(ctx, decision.RequestIDs)
+	if acquisitionErr != nil {
+		accepted = nil
+	}
+	if p.Session.ID() != progress.SessionID {
+		return lifecycle.ErrSessionChanged
+	}
+	err := p.Store.RecordAdmissionOutcome(ctx, lease, profile, time.Now(), message, accepted)
+	// A later step acknowledges the recorded outcome after the supervisor has
+	// applied backoff for any acquisition error.
 	return errors.Join(acquisitionErr, err)
 }
 
