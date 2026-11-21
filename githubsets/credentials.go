@@ -116,6 +116,7 @@ func newClient(scope, kind string, fields map[string]json.RawMessage, httpClient
 		scaleset.WithLogger(slog.New(slog.DiscardHandler)),
 		scaleset.WithRetry(retry),
 	}
+	info := scaleset.SystemInfo{System: "scaleset-example-aws", Subsystem: "controller"}
 	var client *scaleset.Client
 	var err error
 	switch kind {
@@ -126,7 +127,7 @@ func newClient(scope, kind string, fields map[string]json.RawMessage, httpClient
 			return nil, fmt.Errorf("%w: expected one nonempty token field", ErrInvalidSecret)
 		}
 		client, err = scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{
-			GitHubConfigURL: scope, PersonalAccessToken: token,
+			GitHubConfigURL: scope, PersonalAccessToken: token, SystemInfo: info,
 		}, options...)
 	case "github-app":
 		var auth scaleset.GitHubAppAuth
@@ -137,7 +138,7 @@ func newClient(scope, kind string, fields map[string]json.RawMessage, httpClient
 			return nil, fmt.Errorf("%w: expected clientId, installationId and privateKey", ErrInvalidSecret)
 		}
 		client, err = scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{
-			GitHubConfigURL: scope, GitHubAppAuth: auth,
+			GitHubConfigURL: scope, GitHubAppAuth: auth, SystemInfo: info,
 		}, options...)
 	default:
 		return nil, errors.New("unsupported GitHub credential type")

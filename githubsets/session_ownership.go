@@ -51,10 +51,9 @@ func (c *Connection) openSession(ctx context.Context, ledger *lifecycle.Store, l
 	if err != nil {
 		return nil, err
 	}
-	request, status := trackResponseStatus(ctx)
-	raw, err := c.client.MessageSessionClient(oneWriteAttempt(request), target.ScaleSetID, intent.OwnerName)
+	raw, err := c.client.MessageSessionClient(oneWriteAttempt(ctx), target.ScaleSetID, intent.OwnerName)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrSessionUnconfirmed, requestError("open GitHub session", status.Load(), err))
+		return nil, fmt.Errorf("%w: %w", ErrSessionUnconfirmed, requestError("open GitHub session", err))
 	}
 	session, err := AdaptSession(raw)
 	if err != nil {
@@ -90,9 +89,8 @@ func (s *Session) CloseOwned(ctx context.Context, ledger *lifecycle.Store, lease
 	if intent.Phase == lifecycle.SessionClosed {
 		return nil
 	}
-	request, status := trackResponseStatus(ctx)
-	if err := s.client.Close(oneWriteAttempt(request)); err != nil {
-		return fmt.Errorf("%w: %w", ErrSessionUnconfirmed, requestError("close GitHub session", status.Load(), err))
+	if err := s.client.Close(oneWriteAttempt(ctx)); err != nil {
+		return fmt.Errorf("%w: %w", ErrSessionUnconfirmed, requestError("close GitHub session", err))
 	}
 	if err := ledger.ConfirmSessionClose(ctx, lease, s.profile, intent, time.Now()); err != nil {
 		return fmt.Errorf("%w: %w", ErrSessionUnconfirmed, err)

@@ -5,7 +5,7 @@ go 1.27.4
 ignore ./cdk
 
 require (
-	github.com/actions/scaleset v0.5.0
+	github.com/actions/scaleset v0.5.1-0.20261107082901-716908e50799
 	github.com/aws/aws-sdk-go-v2 v1.48.0
 	github.com/aws/aws-sdk-go-v2/config v1.33.21
 	github.com/aws/aws-sdk-go-v2/service/autoscaling v1.82.0
