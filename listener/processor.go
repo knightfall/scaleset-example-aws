@@ -68,7 +68,7 @@ func (p Processor) step(ctx context.Context, lease lifecycle.Lease, profile stri
 		owner.ControllerID != lease.Owner || owner.Epoch != lease.Epoch) {
 		return lifecycle.ErrSessionChanged
 	}
-	if progress.PendingMessageID == 0 {
+	if !progress.HasPendingMessage() {
 		maximum := 0
 		if capacity != nil {
 			maximum = capacity.Maximum
@@ -94,7 +94,7 @@ func (p Processor) step(ctx context.Context, lease lifecycle.Lease, profile stri
 	if p.Session.ID() != progress.SessionID {
 		return lifecycle.ErrSessionChanged
 	}
-	if progress.PendingMessageID == 0 {
+	if !progress.HasPendingMessage() {
 		return nil
 	}
 	if refresh != nil {

@@ -53,6 +53,7 @@ func TestSessionAdapterRefreshesAndPassesOnlySanitizedJobFacts(t *testing.T) {
 			check: func(r *http.Request) { checkJSON(t, r, `[101]`) }},
 		exchange{method: "DELETE", path: queuePath + "/19", err: errors.New("fixture-secret-ack")},
 		exchange{method: "GET", path: queuePath, status: 202, check: checkPoll("queue-new")},
+		exchange{method: "DELETE", path: queuePath + "/0", status: 204},
 	)
 	client, err := newPAT(t, scope, wire).MessageSessionClient(t.Context(), 7, "fixture-owner")
 	if err != nil {
@@ -84,5 +85,8 @@ func TestSessionAdapterRefreshesAndPassesOnlySanitizedJobFacts(t *testing.T) {
 	}
 	if message, err := session.Poll(t.Context(), 18, 0); message != nil || err != nil || session.ID() != sessionID {
 		t.Fatalf("empty poll = %+v, error = %v", message, err)
+	}
+	if err := session.Acknowledge(t.Context(), 0); err != nil {
+		t.Fatalf("acknowledgement for message zero: %v", err)
 	}
 }

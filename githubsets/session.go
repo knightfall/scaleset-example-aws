@@ -59,7 +59,7 @@ func (s *Session) Acquire(ctx context.Context, ids []int64) ([]int64, error) {
 }
 
 func (s *Session) Acknowledge(ctx context.Context, messageID int64) error {
-	if messageID <= 0 || int64(int(messageID)) != messageID {
+	if messageID < 0 || int64(int(messageID)) != messageID {
 		return errors.New("invalid GitHub message ID")
 	}
 	ctx, status := trackResponseStatus(ctx)
